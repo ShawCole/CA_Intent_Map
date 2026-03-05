@@ -99,10 +99,13 @@ export function MultiSelectPopover({
     return () => document.removeEventListener('keydown', handleKey);
   }, [open]);
 
-  // Focus search when opened
+  // Focus search when opened — only on desktop to avoid mobile keyboard popup
+  const showSearch = options.length > 8;
   useEffect(() => {
-    if (open) searchRef.current?.focus();
-  }, [open]);
+    if (open && showSearch && window.innerWidth >= 768) {
+      searchRef.current?.focus();
+    }
+  }, [open, showSearch]);
 
   return (
     <>
@@ -130,17 +133,19 @@ export function MultiSelectPopover({
           className="fixed z-[9999] w-64 rounded-xl border border-white/10 bg-gray-900/95 backdrop-blur-xl shadow-2xl"
           style={{ top: pos.top, left: pos.left }}
         >
-          {/* Search */}
-          <div className="p-2 border-b border-white/5">
-            <input
-              ref={searchRef}
-              type="text"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder={`Search ${label.toLowerCase()}...`}
-              className="w-full bg-white/5 rounded-lg px-2.5 py-1.5 text-xs text-gray-200 placeholder-gray-500 outline-none focus:ring-1 focus:ring-purple-500/40"
-            />
-          </div>
+          {/* Search — only shown when there are enough options to warrant it */}
+          {showSearch && (
+            <div className="p-2 border-b border-white/5">
+              <input
+                ref={searchRef}
+                type="text"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder={`Search ${label.toLowerCase()}...`}
+                className="w-full bg-white/5 rounded-lg px-2.5 py-1.5 text-xs text-gray-200 placeholder-gray-500 outline-none focus:ring-1 focus:ring-purple-500/40"
+              />
+            </div>
+          )}
 
           {/* Options list */}
           <div className="max-h-60 overflow-y-auto p-1">
