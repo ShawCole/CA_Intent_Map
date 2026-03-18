@@ -9,9 +9,9 @@ import { INCOME_RANGE_ORDER, INCOME_RANGE_LABELS, INCOME_MOBILE_LABELS } from '.
 
 export function IncomeCard({ onClose, compact }: { onClose?: () => void; compact?: boolean }) {
   useRenderPerf('IncomeCard');
-  const { filteredRecords } = useFilters();
+  const { apiData } = useFilters();
   const labels = compact ? INCOME_MOBILE_LABELS : INCOME_RANGE_LABELS;
-  const data = useAggregation(filteredRecords, 'INCOME_RANGE', INCOME_RANGE_ORDER, labels);
+  const data = useAggregation(apiData?.aggregations.income, INCOME_RANGE_ORDER, labels);
   const reversed = useMemo(() => [...data].reverse(), [data]);
 
   if (compact) {

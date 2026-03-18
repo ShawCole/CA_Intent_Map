@@ -4,7 +4,6 @@ import {
   Banknote,
   CreditCard,
   MapPin,
-  Home,
   Heart,
   Languages,
 } from 'lucide-react';
@@ -21,7 +20,6 @@ export const CARD_CONFIGS: CardConfig[] = [
   { id: 'income', label: 'Income', icon: <Banknote size={16} /> },
   { id: 'credit', label: 'Credit Rating', icon: <CreditCard size={16} /> },
   { id: 'net-worth', label: 'Net Worth', icon: <DollarSign size={16} /> },
-  { id: 'home-value', label: 'Home Value', icon: <Home size={16} /> },
   { id: 'family', label: 'Family Dynamics', icon: <Heart size={16} /> },
   { id: 'language', label: 'Primary Language', icon: <Languages size={16} /> },
 ];

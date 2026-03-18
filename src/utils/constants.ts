@@ -1,8 +1,10 @@
-export const HOME_VALUE_ORDER = [
-  '$0-$50k', '$50-100k', '$100-150k', '$150-200k', '$200-250k',
-  '$250-300k', '$300-350k', '$350-400k', '$400-450k', '$450-500k',
-  '$500-750k', '$750-999k', 'Over $1M',
-];
+export const INTENT_ORDER = ['high', 'medium', 'low'];
+
+export const INTENT_LABELS: Record<string, string> = {
+  high: 'High Intent',
+  medium: 'Medium Intent',
+  low: 'Low Intent',
+};
 
 export const AGE_RANGE_ORDER = [
   '18-24', '25-34', '35-44', '45-54', '55-64', '65 and older',

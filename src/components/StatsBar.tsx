@@ -1,146 +1,74 @@
 import { useMemo, useCallback, useState } from 'react';
 import { useFilters } from '../contexts/FilterContext';
-import { ZIP_TO_COUNTY } from '../utils/zipCounty';
+import { exportUrl } from '../utils/apiClient';
 import { buildShareURL } from '../utils/urlFilters';
 import { MapPin, Download, Link, Check } from 'lucide-react';
-import type { IntentRecord } from '../types/record';
-
-function exportCSV(records: IntentRecord[]) {
-  if (records.length === 0) return;
-  // Collect ALL unique columns across all records (not just the first one)
-  const headerSet = new Set<string>();
-  for (const r of records) {
-    for (const k of Object.keys(r)) headerSet.add(k);
-  }
-  const headers = Array.from(headerSet);
-  const escape = (v: unknown) => {
-    const s = String(v ?? '');
-    return s.includes(',') || s.includes('"') || s.includes('\n')
-      ? `"${s.replace(/"/g, '""')}"`
-      : s;
-  };
-  const rows = [
-    headers.join(','),
-    ...records.map(r => headers.map(h => escape(r[h])).join(',')),
-  ];
-  const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  const date = new Date().toISOString().slice(0, 10);
-  a.download = `intent-export-${date}-${records.length}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-function toTitleCase(s: string): string {
-  return s.toLowerCase().split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-}
-
-/** Derive the most common city per ZIP from all records */
-function buildZipToCity(records: { SKIPTRACE_ZIP: string; PERSONAL_CITY: string }[]): Record<string, string> {
-  const freq: Record<string, Record<string, number>> = {};
-  for (const r of records) {
-    const zip = r.SKIPTRACE_ZIP;
-    const city = r.PERSONAL_CITY?.trim();
-    if (!zip || !city) continue;
-    if (!freq[zip]) freq[zip] = {};
-    const tc = toTitleCase(city);
-    freq[zip][tc] = (freq[zip][tc] || 0) + 1;
-  }
-  const map: Record<string, string> = {};
-  for (const [zip, cities] of Object.entries(freq)) {
-    let best = '';
-    let max = 0;
-    for (const [city, count] of Object.entries(cities)) {
-      if (count > max) { best = city; max = count; }
-    }
-    map[zip] = best;
-  }
-  return map;
-}
 
 function describeArea(
-  zips: string[],
-  zipToCity: Record<string, string>,
+  filters: {
+    selectedZips: Set<string>;
+    county: { include: Set<string> };
+    city: { include: Set<string> };
+    state: { include: Set<string> };
+  },
+  countyLabelMap: Record<string, string>,
 ): string {
-  if (zips.length === 0) return 'California';
-
-  // Group by city and county
-  const cityGroups = new Map<string, string[]>(); // city → zips
-  const countyGroups = new Map<string, string[]>(); // county → zips
-  for (const z of zips) {
-    const city = zipToCity[z] || '';
-    const county = ZIP_TO_COUNTY[z] || 'Unknown';
-    if (!cityGroups.has(city)) cityGroups.set(city, []);
-    cityGroups.get(city)!.push(z);
-    if (!countyGroups.has(county)) countyGroups.set(county, []);
-    countyGroups.get(county)!.push(z);
+  // State filter
+  if (filters.state.include.size > 0) {
+    const states = [...filters.state.include];
+    if (states.length === 1) return states[0];
+    if (states.length === 2) return `${states[0]} & ${states[1]}`;
+    return `${states.length} States`;
   }
 
-  const cities = [...cityGroups.keys()].filter(c => c !== '');
-  const counties = [...countyGroups.keys()].filter(c => c !== 'Unknown');
-
-  // 1 ZIP, no city data → "Near {closest city}" (unincorporated)
-  if (zips.length === 1 && cities.length === 0) {
-    return `ZIP ${zips[0]}`;
+  // Specific ZIPs selected on map
+  if (filters.selectedZips.size > 0) {
+    const count = filters.selectedZips.size;
+    if (count === 1) return `ZIP ${[...filters.selectedZips][0]}`;
+    return `${count} ZIPs`;
   }
 
-  // 1 ZIP with city → "ZIP, City"
-  if (zips.length === 1 && cities.length === 1) {
-    return `${zips[0]}, ${cities[0]}`;
-  }
-
-  // All in one city
-  if (cityGroups.size === 1 && cities.length === 1) {
-    return cities[0];
-  }
-
-  // 2 ZIPs in different cities — show both city names
-  if (zips.length === 2 && cities.length === 2) {
-    return `${cities[0]} & ${cities[1]}`;
-  }
-
-  // 3+ ZIPs: move to county level
-  if (counties.length === 0) {
-    return `${zips.length} ZIPs`;
-  }
-  if (counties.length === 1) {
-    const county = counties[0];
-    // Check if any ZIP lacks a city (unincorporated) — use "area" suffix
-    const hasUnknownCity = cityGroups.has('');
-    return hasUnknownCity ? `${county} area` : `${county} County`;
-  }
-
-  // Multiple counties — sort by ZIP count descending
-  const sorted = counties
-    .map(c => ({ county: c, count: countyGroups.get(c)?.length ?? 0 }))
-    .sort((a, b) => b.count - a.count);
-
-  const largest = sorted[0];
-  const second = sorted[1];
-  const otherZips = zips.length - largest.count;
-
-  if (counties.length === 2) {
-    // If roughly balanced (within 1 ZIP), show both names
-    if (second && largest.count - second.count <= 1) {
-      return `${largest.county} & ${second.county} Counties`;
+  // County filter
+  if (filters.county.include.size > 0) {
+    const counties = [...filters.county.include];
+    if (counties.length === 1) {
+      const label = countyLabelMap[counties[0]];
+      return label ? `${label} County` : `County ${counties[0]}`;
     }
-    // Dominant county + remainder
-    return `${largest.county} County +${otherZips}`;
+    if (counties.length === 2) {
+      const n1 = countyLabelMap[counties[0]] || counties[0];
+      const n2 = countyLabelMap[counties[1]] || counties[1];
+      return `${n1} & ${n2}`;
+    }
+    return `${counties.length} Counties`;
   }
 
-  // 3+ counties
-  return `${counties.length} Counties`;
+  // City filter
+  if (filters.city.include.size > 0) {
+    const cities = [...filters.city.include];
+    if (cities.length === 1) return cities[0];
+    return `${cities[0]} & ${cities.length - 1} other${cities.length > 2 ? 's' : ''}`;
+  }
+
+  return 'National';
 }
 
 export function StatsBar({ hideExport }: { hideExport?: boolean } = {}) {
-  const { filters, filteredRecords, allRecords, totalCount } = useFilters();
+  const { filters, apiData } = useFilters();
   const [linkCopied, setLinkCopied] = useState(false);
 
-  const zipToCity = useMemo(() => buildZipToCity(allRecords as any[]), [allRecords]);
+  const countyLabelMap = useMemo(() => {
+    if (!apiData?.filterOptions?.counties) return {};
+    const map: Record<string, string> = {};
+    for (const c of apiData.filterOptions.counties) {
+      map[c.fips] = `${c.name}, ${c.state}`;
+    }
+    return map;
+  }, [apiData?.filterOptions?.counties]);
 
-  const handleExport = useCallback(() => exportCSV(filteredRecords as IntentRecord[]), [filteredRecords]);
+  const handleExport = useCallback(() => {
+    window.open(exportUrl(filters), '_blank');
+  }, [filters]);
 
   const handleCopyLink = useCallback(() => {
     const url = buildShareURL(filters);
@@ -149,26 +77,13 @@ export function StatsBar({ hideExport }: { hideExport?: boolean } = {}) {
     setTimeout(() => setLinkCopied(false), 2000);
   }, [filters]);
 
-  const areaLabel = useMemo(() => {
-    // If specific ZIPs selected on map, describe those
-    if (filters.selectedZips.size > 0) {
-      return describeArea([...filters.selectedZips], zipToCity);
-    }
-    // If county filter active, show those county names
-    if (filters.county.include.size > 0) {
-      const counties = [...filters.county.include];
-      if (counties.length === 1) return `${counties[0]} County`;
-      if (counties.length === 2) return `${counties[0]} & ${counties[1]} Counties`;
-      return `${counties.length} Counties`;
-    }
-    // If city filter active, show those city names
-    if (filters.city.include.size > 0) {
-      const cities = [...filters.city.include];
-      if (cities.length === 1) return cities[0];
-      return `${cities[0]} & ${cities.length - 1} other${cities.length > 2 ? 's' : ''}`;
-    }
-    return 'California';
-  }, [filters.selectedZips, filters.county.include, filters.city.include, zipToCity]);
+  const areaLabel = useMemo(
+    () => describeArea(filters, countyLabelMap),
+    [filters, countyLabelMap],
+  );
+
+  const filteredCount = apiData?.filteredContacts ?? 0;
+  const totalCount = apiData?.totalContacts ?? 0;
 
   return (
     <div className="pointer-events-auto">
@@ -183,9 +98,9 @@ export function StatsBar({ hideExport }: { hideExport?: boolean } = {}) {
         <div className="border-t border-white/5 pt-2">
           <div className="flex items-baseline justify-between">
             <span className="text-lg font-bold text-white leading-none">
-              {filteredRecords.length.toLocaleString()}
+              {filteredCount.toLocaleString()}
             </span>
-            {filteredRecords.length !== totalCount && (
+            {filteredCount !== totalCount && (
               <span className="text-[10px] text-gray-500">of {totalCount.toLocaleString()}</span>
             )}
           </div>

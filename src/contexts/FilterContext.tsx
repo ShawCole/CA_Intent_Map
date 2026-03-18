@@ -1,17 +1,16 @@
-import { createContext, useContext, useReducer, useMemo, useEffect, type ReactNode } from 'react';
-import type { IntentRecord, MultiSelectFilter } from '../types/record';
-import allRecords from '../data/records.json';
-import { ZIP_TO_COUNTY } from '../utils/zipCounty';
+import { createContext, useContext, useReducer, useMemo, useEffect, useRef, useCallback, useState, type ReactNode } from 'react';
+import type { MultiSelectFilter } from '../types/record';
+import type { DashboardResponse } from '../types/dashboard';
+import { fetchDashboard } from '../utils/apiClient';
 import { searchParamsToFilters, syncFiltersToURL } from '../utils/urlFilters';
-
-const records = allRecords as unknown as IntentRecord[];
 
 function emptyFilter(): MultiSelectFilter {
   return { include: new Set(), exclude: new Set() };
 }
 
-interface FilterState {
-  homeValueTabs: Set<string>;
+export interface FilterState {
+  topic: string;
+  intent: MultiSelectFilter;
   ageRange: MultiSelectFilter;
   gender: MultiSelectFilter;
   incomeRange: MultiSelectFilter;
@@ -21,14 +20,17 @@ interface FilterState {
   city: MultiSelectFilter;
   county: MultiSelectFilter;
   language: MultiSelectFilter;
+  state: MultiSelectFilter;
   selectedZips: Set<string>;
   excludedZips: Set<string>;
 }
 
-export type MultiSelectKey = 'ageRange' | 'gender' | 'incomeRange' | 'netWorth' | 'creditRating' | 'seniorityLevel' | 'city' | 'county' | 'language';
+export type MultiSelectKey =
+  | 'intent' | 'ageRange' | 'gender' | 'incomeRange' | 'netWorth'
+  | 'creditRating' | 'seniorityLevel' | 'city' | 'county' | 'language' | 'state';
 
 type Action =
-  | { type: 'TOGGLE_HOME_VALUE'; tab: string }
+  | { type: 'SET_TOPIC'; topic: string }
   | { type: 'TOGGLE_MULTI_SELECT'; key: MultiSelectKey; value: string; state: 'include' | 'exclude' | 'unset' }
   | { type: 'CLEAR_MULTI_SELECT'; key: MultiSelectKey }
   | { type: 'TOGGLE_ZIP'; zip: string }
@@ -37,9 +39,12 @@ type Action =
   | { type: 'CLEAR_EXCLUDED_ZIPS' }
   | { type: 'CLEAR_ALL' };
 
+const DEFAULT_TOPIC = 'wealth-management-services';
+
 function buildEmptyState(): FilterState {
   return {
-    homeValueTabs: new Set(),
+    topic: DEFAULT_TOPIC,
+    intent: emptyFilter(),
     ageRange: emptyFilter(),
     gender: emptyFilter(),
     incomeRange: emptyFilter(),
@@ -49,13 +54,13 @@ function buildEmptyState(): FilterState {
     city: emptyFilter(),
     county: emptyFilter(),
     language: emptyFilter(),
+    state: emptyFilter(),
     selectedZips: new Set(),
     excludedZips: new Set(),
   };
 }
 
 function buildInitialState(): FilterState {
-  // Hydrate from URL params if present
   const fromURL = searchParamsToFilters(window.location.search);
   return fromURL ?? buildEmptyState();
 }
@@ -64,20 +69,14 @@ const initialState = buildInitialState();
 
 function reducer(state: FilterState, action: Action): FilterState {
   switch (action.type) {
-    case 'TOGGLE_HOME_VALUE': {
-      const next = new Set(state.homeValueTabs);
-      if (next.has(action.tab)) next.delete(action.tab);
-      else next.add(action.tab);
-      return { ...state, homeValueTabs: next };
-    }
+    case 'SET_TOPIC':
+      return { ...buildEmptyState(), topic: action.topic };
     case 'TOGGLE_MULTI_SELECT': {
       const prev = state[action.key];
       const include = new Set(prev.include);
       const exclude = new Set(prev.exclude);
-      // Remove from both first
       include.delete(action.value);
       exclude.delete(action.value);
-      // Add to the target set
       if (action.state === 'include') include.add(action.value);
       else if (action.state === 'exclude') exclude.add(action.value);
       return { ...state, [action.key]: { include, exclude } };
@@ -101,198 +100,133 @@ function reducer(state: FilterState, action: Action): FilterState {
     case 'CLEAR_EXCLUDED_ZIPS':
       return { ...state, excludedZips: new Set() };
     case 'CLEAR_ALL':
-      return buildEmptyState();
+      return { ...buildEmptyState(), topic: state.topic };
     default:
       return state;
   }
 }
 
-const FIELD_MAP: Record<string, keyof IntentRecord> = {
-  ageRange: 'AGE_RANGE',
-  gender: 'GENDER',
-  incomeRange: 'INCOME_RANGE',
-  netWorth: 'NET_WORTH',
-  creditRating: 'SKIPTRACE_CREDIT_RATING',
-  seniorityLevel: 'SENIORITY_LEVEL',
-  city: 'PERSONAL_CITY',
-  language: 'SKIPTRACE_LANGUAGE_CODE',
-};
-
-function toTitleCase(s: string): string {
-  return s
-    .toLowerCase()
-    .split(' ')
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
+// Serialize filter state to a stable string for effect dependency comparison.
+// This avoids re-firing effects due to new Set/object references.
+function serializeFilters(f: FilterState): string {
+  const serSet = (s: Set<string>) => [...s].sort().join(',');
+  const serMF = (m: MultiSelectFilter) => `${serSet(m.include)}|${serSet(m.exclude)}`;
+  return [
+    f.topic,
+    serMF(f.intent), serMF(f.ageRange), serMF(f.gender),
+    serMF(f.incomeRange), serMF(f.netWorth), serMF(f.creditRating),
+    serMF(f.seniorityLevel), serMF(f.city), serMF(f.county),
+    serMF(f.language), serMF(f.state),
+    serSet(f.selectedZips), serSet(f.excludedZips),
+  ].join(';;');
 }
 
-function applyMultiFilter(filter: MultiSelectFilter, value: string): boolean {
-  // Exclude takes priority
-  if (filter.exclude.size > 0 && filter.exclude.has(value)) return false;
-  // Include whitelist
-  if (filter.include.size > 0 && !filter.include.has(value)) return false;
-  return true;
+export interface Topic {
+  topic_id: number;
+  topic_slug: string;
+  topic_label: string;
+  category: string;
+  signal_count: string;
 }
 
 interface FilterContextValue {
   filters: FilterState;
-  /** Records after ALL filters including ZIP exclusions — used by charts, cards, stats */
-  filteredRecords: IntentRecord[];
-  /** Records after all filters EXCEPT ZIP exclusions — used for tooltip counts on excluded ZIPs */
-  baseFilteredRecords: IntentRecord[];
-  /** Records after demographic filters only (no area filters: county, city, ZIPs) — used for map tooltip counts */
-  demographicFilteredRecords: IntentRecord[];
-  allRecords: IntentRecord[];
-  totalCount: number;
+  apiData: DashboardResponse | null;
+  loading: boolean;
   dispatch: React.Dispatch<Action>;
+  topics: Topic[];
 }
 
 const FilterContext = createContext<FilterContextValue>(null!);
 
 export function FilterProvider({ children }: { children: ReactNode }) {
   const [filters, dispatch] = useReducer(reducer, initialState);
+  const [apiData, setApiData] = useState<DashboardResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [topics, setTopics] = useState<Topic[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Sync filter state → URL bar on every change
+  // Fetch available topics on mount
+  useEffect(() => {
+    const API_BASE = import.meta.env.VITE_API_URL || '';
+    const API_KEY = import.meta.env.VITE_API_KEY || '';
+    const headers: Record<string, string> = {};
+    if (API_KEY) headers['x-api-key'] = API_KEY;
+    fetch(`${API_BASE}/api/topics`, { headers })
+      .then(r => r.json())
+      .then((data: Topic[]) => {
+        // Filter out "unknown" and topics with 0 signals
+        setTopics(data.filter(t => t.topic_slug !== 'unknown' && Number(t.signal_count) > 0));
+      })
+      .catch(err => console.error('Failed to fetch topics:', err));
+  }, []);
+
+  // Stable serialized key — only changes when filter *values* actually change
+  const filterKey = serializeFilters(filters);
+  // Keep a ref to the latest filters so the fetch always reads current state
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
+
+  // Sync filter state → URL bar
   useEffect(() => {
     syncFiltersToURL(filters);
-  }, [filters]);
+  }, [filterKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Stage 0: demographic filters only (no area filters: county, city, ZIPs)
-  // Used for map tooltip counts — every ZIP shows how many records survive non-area filters
-  const demographicFilteredRecords = useMemo(() => {
-    return records.filter(r => {
-      if (filters.homeValueTabs.size > 0 && !filters.homeValueTabs.has(r.HOME_VALUE_TAB)) {
-        return false;
-      }
-      for (const [filterKey, field] of Object.entries(FIELD_MAP)) {
-        if (filterKey === 'county' || filterKey === 'city') continue; // skip area filters
-        const mf = filters[filterKey as MultiSelectKey];
-        if (mf.include.size === 0 && mf.exclude.size === 0) continue;
-        let val = r[field] || '';
-        if (!applyMultiFilter(mf, val)) return false;
-      }
-      return true;
-    });
-  }, [filters]);
-
-  // Stage 1: all filters EXCEPT selectedZips and excludedZips
-  // Used for map clickability — shows what each ZIP would have before manual ZIP selection
-  // Geo filters (county + city) use OR logic: record passes if it matches ANY included county OR ANY included city
-  // Geo excludes always win: if a record's county or city is excluded, it's out regardless of includes
-  const baseFilteredRecords = useMemo(() => {
-    const hasGeoInclude = filters.county.include.size > 0 || filters.city.include.size > 0;
-    const hasGeoExclude = filters.county.exclude.size > 0 || filters.city.exclude.size > 0;
-    const hasGeoFilter = hasGeoInclude || hasGeoExclude;
-
-    return records.filter(r => {
-      if (filters.homeValueTabs.size > 0 && !filters.homeValueTabs.has(r.HOME_VALUE_TAB)) {
-        return false;
-      }
-
-      // Combined geo filter: county and city as OR with excludes-always-win
-      if (hasGeoFilter) {
-        const county = ZIP_TO_COUNTY[r.SKIPTRACE_ZIP] || '';
-        const city = toTitleCase(r.PERSONAL_CITY || '');
-
-        // Excludes always win — check first
-        if (filters.county.exclude.size > 0 && county && filters.county.exclude.has(county)) return false;
-        if (filters.city.exclude.size > 0 && city && filters.city.exclude.has(city)) return false;
-
-        // If there are includes, record must match at least one (OR logic)
-        if (hasGeoInclude) {
-          const matchesCounty = filters.county.include.size > 0 && county && filters.county.include.has(county);
-          const matchesCity = filters.city.include.size > 0 && city && filters.city.include.has(city);
-          if (!matchesCounty && !matchesCity) return false;
-        }
-      }
-
-      // All other non-geo multi-select filters
-      for (const [filterKey, field] of Object.entries(FIELD_MAP)) {
-        if (filterKey === 'county' || filterKey === 'city') continue; // handled above
-        const mf = filters[filterKey as MultiSelectKey];
-        if (mf.include.size === 0 && mf.exclude.size === 0) continue;
-
-        const val = r[field] || '';
-        if (!applyMultiFilter(mf, val)) return false;
-      }
-      return true;
-    });
-  }, [filters]);
-
-  // Stage 2: selectedZips override county/city geography + excludedZips blacklist
-  // Selected ZIPs bypass geographic filters (county, city) but still respect demographic filters
-  const filteredRecords = useMemo(() => {
-    if (filters.selectedZips.size === 0 && filters.excludedZips.size === 0) {
-      return baseFilteredRecords;
-    }
-
-    let result: IntentRecord[];
-
-    if (filters.selectedZips.size > 0) {
-      const hasGeoFilter = filters.county.include.size > 0 || filters.county.exclude.size > 0
-        || filters.city.include.size > 0 || filters.city.exclude.size > 0;
-
-      if (hasGeoFilter) {
-        // With geographic filters active: base records + selected ZIPs that bypass geo filters
-        const selectedZipRecords = records.filter(r => {
-          if (!filters.selectedZips.has(r.SKIPTRACE_ZIP)) return false;
-          if (filters.homeValueTabs.size > 0 && !filters.homeValueTabs.has(r.HOME_VALUE_TAB)) return false;
-          for (const [filterKey, field] of Object.entries(FIELD_MAP)) {
-            if (filterKey === 'county' || filterKey === 'city') continue;
-            const mf = filters[filterKey as MultiSelectKey];
-            if (mf.include.size === 0 && mf.exclude.size === 0) continue;
-            let val = r[field] || '';
-            if (!applyMultiFilter(mf, val)) return false;
-          }
-          return true;
-        });
-        const baseSet = new Set(baseFilteredRecords);
-        for (const r of selectedZipRecords) baseSet.add(r);
-        result = Array.from(baseSet);
-      } else {
-        // No geographic filters: selected ZIPs act as a pure whitelist
-        result = baseFilteredRecords.filter(r => filters.selectedZips.has(r.SKIPTRACE_ZIP));
-      }
-    } else {
-      result = baseFilteredRecords;
-    }
-
-    if (filters.excludedZips.size > 0) {
-      result = result.filter(r => !filters.excludedZips.has(r.SKIPTRACE_ZIP));
-    }
-    return result;
-  }, [baseFilteredRecords, filters]);
-
-  // DEV: measure filter performance
+  // Fetch dashboard data when filters change (debounced)
   useEffect(() => {
-    if (import.meta.env.DEV) {
-      const t0 = performance.now();
-      // Force a synchronous re-aggregate to measure cost
-      const filterPass = records.filter(r => {
-        if (filters.homeValueTabs.size > 0 && !filters.homeValueTabs.has(r.HOME_VALUE_TAB)) return false;
-        for (const [filterKey, field] of Object.entries(FIELD_MAP)) {
-          const mf = filters[filterKey as MultiSelectKey];
-          if (mf.include.size === 0 && mf.exclude.size === 0) continue;
-          let val = r[field] || '';
-          if (filterKey === 'city') val = val.toLowerCase().split(' ').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-          if (!applyMultiFilter(mf, val)) return false;
-        }
-        return true;
-      });
-      const t1 = performance.now();
-      console.log(`[perf] Filter: ${(t1-t0).toFixed(1)}ms → ${filterPass.length} records (from ${records.length})`);
+    // Cancel any pending debounce
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    const doFetch = () => {
+      // Abort previous in-flight request
+      if (abortRef.current) abortRef.current.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      setLoading(true);
+      fetchDashboard(filtersRef.current, controller.signal)
+        .then(data => {
+          if (!controller.signal.aborted) {
+            setApiData(data);
+            setLoading(false);
+          }
+        })
+        .catch(err => {
+          if (err.name !== 'AbortError') {
+            console.error('Dashboard fetch failed:', err);
+            setLoading(false);
+          }
+        });
+    };
+
+    // First load: fetch immediately. Subsequent: debounce 300ms.
+    if (!apiData) {
+      doFetch();
+    } else {
+      debounceRef.current = setTimeout(doFetch, 300);
     }
-  }, [filters]);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [filterKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Cleanup abort on unmount — but DON'T abort, let the request finish
+  // so strict-mode remount can pick up the result
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
 
   const value = useMemo(() => ({
     filters,
-    filteredRecords,
-    baseFilteredRecords,
-    demographicFilteredRecords,
-    allRecords: records,
-    totalCount: records.length,
+    apiData,
+    loading,
     dispatch,
-  }), [filters, filteredRecords, baseFilteredRecords, demographicFilteredRecords]);
+    topics,
+  }), [filters, apiData, loading, topics]);
 
   return (
     <FilterContext.Provider value={value}>

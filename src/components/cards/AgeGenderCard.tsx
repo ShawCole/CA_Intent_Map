@@ -3,15 +3,15 @@ import { useFilters } from '../../contexts/FilterContext';
 import { useRenderPerf } from '../../hooks/useRenderPerf';
 import { FloatingCard } from './FloatingCard';
 import { PopulationPyramid } from '../charts/PopulationPyramid';
-import { buildPyramid } from '../../utils/aggregation';
+import { reshapePyramid } from '../../utils/aggregation';
 import { AGE_RANGE_ORDER } from '../../utils/constants';
 
 export function AgeGenderCard({ onClose, compact }: { onClose?: () => void; compact?: boolean }) {
   useRenderPerf('AgeGenderCard');
-  const { filteredRecords } = useFilters();
+  const { apiData } = useFilters();
   const data = useMemo(
-    () => buildPyramid(filteredRecords, AGE_RANGE_ORDER),
-    [filteredRecords],
+    () => apiData ? reshapePyramid(apiData.aggregations.age_gender, AGE_RANGE_ORDER) : [],
+    [apiData],
   );
 
   return (

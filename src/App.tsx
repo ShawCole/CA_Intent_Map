@@ -11,23 +11,21 @@ import { NetWorthCard } from './components/cards/NetWorthCard';
 import { IncomeCard } from './components/cards/IncomeCard';
 import { CreditRatingCard } from './components/cards/CreditRatingCard';
 import { TopCitiesCard } from './components/cards/TopCitiesCard';
-import { HomeValueCard } from './components/cards/HomeValueCard';
 import { FamilyDynamicsCard } from './components/cards/FamilyDynamicsCard';
 import { LanguageCard } from './components/cards/LanguageCard';
 
 const MOBILE_BREAKPOINT = 768;
 
 // Percentage-based positions for desktop draggable cards: [xPct, yPct]
-// 3-column layout clustered bottom-left
+// 3-column layout clustered bottom-left (7 cards, no home-value)
 const PCT_POSITIONS: Record<string, [number, number]> = {
   'family':      [0.025, 0.152],
   'language':    [0.207, 0.152],
   'credit':      [0.396, 0.152],
   'income':      [0.025, 0.438],
   'net-worth':   [0.236, 0.438],
-  'home-value':  [0.025, 0.679],
-  'top-cities':  [0.196, 0.679],
-  'age-gender':  [0.382, 0.679],
+  'age-gender':  [0.025, 0.679],
+  'top-cities':  [0.236, 0.679],
 };
 
 function computePositions() {
@@ -44,8 +42,8 @@ function computePositions() {
 const GRID_ORDER = [
   'age-gender', 'top-cities',
   'income',     'credit',
-  'net-worth',  'home-value',
-  'family',     'language',
+  'net-worth',  'family',
+  'language',
 ];
 
 function App() {
@@ -77,7 +75,6 @@ function App() {
     { id: 'income',     node: <IncomeCard onClose={() => onToggle('income')} /> },
     { id: 'credit',     node: <CreditRatingCard onClose={() => onToggle('credit')} /> },
     { id: 'net-worth',  node: <NetWorthCard onClose={() => onToggle('net-worth')} /> },
-    { id: 'home-value', node: <HomeValueCard onClose={() => onToggle('home-value')} /> },
     { id: 'family',     node: <FamilyDynamicsCard onClose={() => onToggle('family')} /> },
     { id: 'language',   node: <LanguageCard onClose={() => onToggle('language')} /> },
   ];
@@ -89,7 +86,6 @@ function App() {
     'income':     <IncomeCard onClose={() => onToggle('income')} compact />,
     'credit':     <CreditRatingCard onClose={() => onToggle('credit')} compact />,
     'net-worth':  <NetWorthCard onClose={() => onToggle('net-worth')} compact />,
-    'home-value': <HomeValueCard onClose={() => onToggle('home-value')} compact />,
     'family':     <FamilyDynamicsCard onClose={() => onToggle('family')} compact />,
     'language':   <LanguageCard onClose={() => onToggle('language')} compact />,
   };

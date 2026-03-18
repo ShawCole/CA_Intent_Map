@@ -1,455 +1,590 @@
-import { useRef, useCallback, useEffect, useState, useMemo } from 'react';
-import Map, { Source, Layer, type MapRef, type MapLayerMouseEvent } from 'react-map-gl';
-import 'mapbox-gl/dist/mapbox-gl.css';
+import { useRef, useEffect, useState, useMemo } from 'react';
+import maplibregl from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
 import { useMobileFade } from '../hooks/useMobileTooltipDismiss';
 import { useRenderPerf } from '../hooks/useRenderPerf';
 import { useFilters } from '../contexts/FilterContext';
-import { useZipAggregation } from '../hooks/useZipAggregation';
-import { ZIP_TO_COUNTY } from '../utils/zipCounty';
+import type { GeoCounty, GeoZip } from '../types/dashboard';
+import { Protocol } from 'pmtiles';
 
-const TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
+const TILES_BASE = import.meta.env.VITE_TILES_URL || 'https://storage.googleapis.com/listmagic-tiles';
 
-// Fallback center for CA (used before fitBounds runs)
-const INITIAL_VIEW = {
-  longitude: -119.4,
-  latitude: 37.2,
-  zoom: 5.8,
+// National center
+const INITIAL_VIEW = { lng: -98.5, lat: 39.5, zoom: 4 };
+
+// Register PMTiles protocol once
+let protocolAdded = false;
+function ensureProtocol() {
+  if (protocolAdded) return;
+  const protocol = new Protocol();
+  maplibregl.addProtocol('pmtiles', protocol.tile);
+  protocolAdded = true;
+}
+
+// Dark style (self-hosted, no Mapbox token needed)
+const DARK_STYLE: maplibregl.StyleSpecification = {
+  version: 8,
+  name: 'Dark',
+  sources: {
+    'osm-tiles': {
+      type: 'raster',
+      tiles: ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png'],
+      tileSize: 256,
+      attribution: '&copy; <a href="https://carto.com">CARTO</a> &copy; <a href="https://openstreetmap.org">OSM</a>',
+    },
+  },
+  layers: [
+    {
+      id: 'background',
+      type: 'background',
+      paint: { 'background-color': '#030712' },
+    },
+    {
+      id: 'osm-tiles',
+      type: 'raster',
+      source: 'osm-tiles',
+      paint: { 'raster-opacity': 0.6 },
+    },
+  ],
 };
 
-/** Compute the bounding box of GeoJSON features matching a set of ZIP codes */
-function computeZipBounds(
-  geojson: GeoJSON.FeatureCollection,
-  zipsWithData: Set<string>,
-): [number, number, number, number] | null {
-  let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
-  let found = false;
+// County: static scale (raw counts work well with large spread)
+const FILL_COLOR: maplibregl.ExpressionSpecification = [
+  'interpolate', ['linear'], ['coalesce', ['feature-state', 'density'], 0],
+  0, 'rgba(0,0,0,0)',
+  1, '#1e3a5f',
+  5, '#2563eb',
+  15, '#7c3aed',
+  40, '#a855f7',
+  100, '#dc2626',
+  300, '#ef4444',
+];
 
-  for (const feature of geojson.features) {
-    const zip = String(
-      feature.properties?.ZCTA5CE20 || feature.properties?.ZCTA5CE10 || feature.properties?.ZIP || '',
-    ).padStart(5, '0');
-    if (!zipsWithData.has(zip)) continue;
+const LINE_COLOR: maplibregl.ExpressionSpecification = [
+  'interpolate', ['linear'], ['coalesce', ['feature-state', 'density'], 0],
+  0, 'rgba(255,255,255,0)',
+  1, '#3b82f6',
+  5, '#6366f1',
+  15, '#8b5cf6',
+  40, '#a855f7',
+  100, '#ef4444',
+  300, '#f87171',
+];
 
-    // Walk all coordinates in the geometry to find bounds
-    const walkCoords = (coords: any) => {
-      if (typeof coords[0] === 'number') {
-        // [lng, lat]
-        const lng = coords[0] as number;
-        const lat = coords[1] as number;
-        if (lng < minLng) minLng = lng;
-        if (lng > maxLng) maxLng = lng;
-        if (lat < minLat) minLat = lat;
-        if (lat > maxLat) maxLat = lat;
-        found = true;
-      } else {
-        for (const c of coords) walkCoords(c);
-      }
-    };
-    walkCoords((feature.geometry as any).coordinates);
-  }
+// Zip: normalized 0–100 scale (counts per zip are small, need full ramp)
+const ZIP_FILL_COLOR: maplibregl.ExpressionSpecification = [
+  'interpolate', ['linear'], ['coalesce', ['feature-state', 'density'], 0],
+  0,  'rgba(0,0,0,0)',
+  1,  '#1e3a5f',
+  15, '#2563eb',
+  35, '#7c3aed',
+  60, '#a855f7',
+  80, '#dc2626',
+  100, '#ef4444',
+];
 
-  return found ? [minLng, minLat, maxLng, maxLat] : null;
-}
+const ZIP_LINE_COLOR: maplibregl.ExpressionSpecification = [
+  'interpolate', ['linear'], ['coalesce', ['feature-state', 'density'], 0],
+  0,  'rgba(255,255,255,0)',
+  1,  '#3b82f6',
+  15, '#6366f1',
+  35, '#8b5cf6',
+  60, '#a855f7',
+  80, '#ef4444',
+  100, '#f87171',
+];
 
 export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
   useRenderPerf('MapView');
-  const mapRef = useRef<MapRef>(null);
-  const { filteredRecords, baseFilteredRecords, demographicFilteredRecords, allRecords, filters, dispatch } = useFilters();
-  const zipCounts = useZipAggregation(filteredRecords);
-  const baseZipCounts = useZipAggregation(baseFilteredRecords);
-  const demoZipCounts = useZipAggregation(demographicFilteredRecords);
-  const allZipCounts = useZipAggregation(allRecords);
-  const [geojson, setGeojson] = useState<GeoJSON.FeatureCollection | null>(null);
+  const mapContainer = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<maplibregl.Map | null>(null);
+  const { apiData, loading } = useFilters();
   const [mapReady, setMapReady] = useState(false);
-  const [hoveredZip, setHoveredZip] = useState<string | null>(null);
+  const [hoveredFeature, setHoveredFeature] = useState<{ name: string; count: number; type: 'county' | 'zip' } | null>(null);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
-  const { style: zipFadeStyle, resetFade: resetZipFade, isMobile } = useMobileFade();
+  const { style: fadeStyle, resetFade } = useMobileFade();
+  const prevCountyIds = useRef<Set<string>>(new Set());
+  const prevZipIds = useRef<Set<string>>(new Set());
 
+  // County/ZIP data lookup maps
+  const countyMap = useMemo(() => {
+    const m = new globalThis.Map<string, GeoCounty>();
+    if (apiData?.geo.counties) {
+      for (const c of apiData.geo.counties) m.set(c.fips, c);
+    }
+    return m;
+  }, [apiData?.geo.counties]);
 
-  // Load GeoJSON and assign stable IDs to each feature
+  const zipMap = useMemo(() => {
+    const m = new globalThis.Map<string, GeoZip>();
+    if (apiData?.geo.zips) {
+      for (const z of apiData.geo.zips) m.set(z.zip, z);
+    }
+    return m;
+  }, [apiData?.geo.zips]);
+
+  // Initialize map
   useEffect(() => {
-    fetch('/ca-zipcodes.geojson')
-      .then(r => r.json())
-      .then((data: GeoJSON.FeatureCollection) => {
-        data.features.forEach((f, i) => { f.id = i; });
-        setGeojson(data);
-      })
-      .catch(() => {
-        setGeojson({ type: 'FeatureCollection', features: [] });
+    if (!mapContainer.current || mapRef.current) return;
+    ensureProtocol();
+
+    const map = new maplibregl.Map({
+      container: mapContainer.current,
+      style: DARK_STYLE,
+      center: [INITIAL_VIEW.lng, INITIAL_VIEW.lat],
+      zoom: INITIAL_VIEW.zoom,
+    });
+
+    map.on('load', () => {
+      // Add PMTiles sources
+      map.addSource('counties', {
+        type: 'vector',
+        url: `pmtiles://${TILES_BASE}/counties.pmtiles`,
+        promoteId: { counties: 'GEOID' },
       });
+      map.addSource('zctas', {
+        type: 'vector',
+        url: `pmtiles://${TILES_BASE}/zctas.pmtiles`,
+        promoteId: { zctas: 'GEOID20' },
+      });
+      map.addSource('states', {
+        type: 'vector',
+        url: `pmtiles://${TILES_BASE}/states.pmtiles`,
+      });
+
+      // State borders — always visible
+      map.addLayer({
+        id: 'state-borders',
+        type: 'line',
+        source: 'states',
+        'source-layer': 'states',
+        paint: {
+          'line-color': 'rgba(255,255,255,0.3)',
+          'line-width': 1,
+        },
+      });
+
+      // County fill — visible at low zoom, fades out by z10
+      map.addLayer({
+        id: 'county-fill',
+        type: 'fill',
+        source: 'counties',
+        'source-layer': 'counties',
+        maxzoom: 11,
+        paint: {
+          'fill-color': FILL_COLOR as any,
+          'fill-opacity': [
+            'interpolate', ['linear'], ['zoom'],
+            7, 0.7,
+            10, 0,
+          ] as any,
+        },
+      });
+
+      map.addLayer({
+        id: 'county-outline',
+        type: 'line',
+        source: 'counties',
+        'source-layer': 'counties',
+        maxzoom: 11,
+        paint: {
+          'line-color': LINE_COLOR as any,
+          'line-width': [
+            'interpolate', ['linear'], ['coalesce', ['feature-state', 'density'], 0],
+            0, 0, 1, 0.5, 100, 1.5,
+          ] as any,
+          'line-opacity': [
+            'interpolate', ['linear'], ['zoom'],
+            7, 1,
+            10, 0,
+          ] as any,
+        },
+      });
+
+      // County labels — z5-z10
+      map.addLayer({
+        id: 'county-labels',
+        type: 'symbol',
+        source: 'counties',
+        'source-layer': 'counties',
+        minzoom: 5,
+        maxzoom: 10,
+        layout: {
+          'text-field': ['get', 'NAME'],
+          'text-size': 10,
+          'text-font': ['Open Sans Regular'],
+          'text-allow-overlap': false,
+        },
+        paint: {
+          'text-color': 'rgba(255,255,255,0.5)',
+          'text-halo-color': 'rgba(0,0,0,0.8)',
+          'text-halo-width': 1,
+        },
+      });
+
+      // ZCTA fill — fades in from z7-z9
+      map.addLayer({
+        id: 'zcta-fill',
+        type: 'fill',
+        source: 'zctas',
+        'source-layer': 'zctas',
+        minzoom: 7,
+        paint: {
+          'fill-color': ZIP_FILL_COLOR as any,
+          'fill-opacity': [
+            'interpolate', ['linear'], ['zoom'],
+            7, 0,
+            9, 0.7,
+          ] as any,
+        },
+      });
+
+      map.addLayer({
+        id: 'zcta-outline',
+        type: 'line',
+        source: 'zctas',
+        'source-layer': 'zctas',
+        minzoom: 7,
+        paint: {
+          'line-color': ZIP_LINE_COLOR as any,
+          'line-width': [
+            'interpolate', ['linear'], ['coalesce', ['feature-state', 'density'], 0],
+            0, 0, 1, 0.5, 100, 1.5,
+          ] as any,
+          'line-opacity': [
+            'interpolate', ['linear'], ['zoom'],
+            7, 0,
+            9, 1,
+          ] as any,
+        },
+      });
+
+      // ZIP labels at high zoom
+      map.addLayer({
+        id: 'zcta-labels',
+        type: 'symbol',
+        source: 'zctas',
+        'source-layer': 'zctas',
+        minzoom: 10,
+        layout: {
+          'text-field': ['get', 'GEOID20'],
+          'text-size': 9,
+          'text-font': ['Open Sans Regular'],
+          'text-allow-overlap': false,
+        },
+        paint: {
+          'text-color': 'rgba(255,255,255,0.6)',
+          'text-halo-color': 'rgba(0,0,0,0.8)',
+          'text-halo-width': 1,
+        },
+      });
+
+      mapRef.current = map;
+      setMapReady(true);
+    });
+
+    return () => {
+      map.remove();
+      mapRef.current = null;
+    };
   }, []);
 
-  // Apply feature states — extracted so we can call it from multiple triggers
-  const applyFeatureStates = useCallback(() => {
-    const map = mapRef.current?.getMap();
-    if (!map || !geojson) return;
-    if (!map.getSource('zips') || !map.isSourceLoaded('zips')) return;
+  // Build county→zips lookup for viewport normalization
+  const zipsByCounty = useMemo(() => {
+    const m = new globalThis.Map<string, GeoZip[]>();
+    if (apiData?.geo.zips) {
+      for (const z of apiData.geo.zips) {
+        const arr = m.get(z.county_fips);
+        if (arr) arr.push(z); else m.set(z.county_fips, [z]);
+      }
+    }
+    return m;
+  }, [apiData?.geo.zips]);
 
-    const t0 = import.meta.env.DEV ? performance.now() : 0;
-    for (const feature of geojson.features) {
-      const zipCode = feature.properties?.ZCTA5CE20 || feature.properties?.ZCTA5CE10 || feature.properties?.ZIP;
-      if (zipCode) {
-        const zip = String(zipCode).padStart(5, '0');
+  // Ref to hold the latest normalization function so moveend can call it
+  const applyZipDensity = useRef<() => void>(() => {});
+
+  // Apply feature states when data changes
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady || !apiData) return;
+
+    const newCountyIds = new Set<string>();
+    const newZipIds = new Set<string>();
+
+    // Global zip normalization (used at low zoom before viewport takes over)
+    let globalMaxZip = 0;
+    for (const z of apiData.geo.zips) { if (z.total > globalMaxZip) globalMaxZip = z.total; }
+
+    // Clear previous county states
+    for (const id of prevCountyIds.current) {
+      try {
         map.setFeatureState(
-          { source: 'zips', id: feature.id } as any,
-          {
-            density: zipCounts.get(zip) || 0,
-            baseDensity: allZipCounts.get(zip) || 0,
-          },
+          { source: 'counties', sourceLayer: 'counties', id },
+          { density: 0 }
         );
-      }
-    }
-    if (import.meta.env.DEV) {
-      console.log(`[render] MapFeatureState: ${(performance.now() - t0).toFixed(1)}ms (${geojson.features.length} features)`);
-    }
-  }, [zipCounts, allZipCounts, geojson]);
-
-  // Re-apply when zipCounts or geojson change
-  useEffect(() => {
-    applyFeatureStates();
-  }, [applyFeatureStates]);
-
-  // Also apply when the source finishes loading (handles race condition)
-  useEffect(() => {
-    if (!mapReady) return;
-    const map = mapRef.current?.getMap();
-    if (!map) return;
-
-    const onSourceData = (e: any) => {
-      if (e.sourceId === 'zips' && e.isSourceLoaded) {
-        applyFeatureStates();
-      }
-    };
-
-    map.on('sourcedata', onSourceData);
-    // Apply immediately in case source already loaded before listeners attached
-    applyFeatureStates();
-    return () => {
-      map.off('sourcedata', onSourceData as any);
-    };
-  }, [applyFeatureStates, mapReady]);
-
-  // Auto-zoom whenever the visible ZIP set or mobile panel state changes
-  // Suppressed only for the immediate effect of a manual ZIP click (not filter changes)
-  const prevFitKey = useRef<string>('');
-  const skipNextFit = useRef(false);
-  useEffect(() => {
-    if (!mapReady || !geojson || geojson.features.length === 0) return;
-
-    if (skipNextFit.current) {
-      skipNextFit.current = false;
-      // Still update the key so future filter changes detect correctly
-      const targetCounts = zipCounts.size > 0 ? zipCounts : allZipCounts;
-      const zips: string[] = [];
-      for (const [zip, count] of targetCounts) { if (count > 0) zips.push(zip); }
-      const mobile = window.innerWidth < 768;
-      prevFitKey.current = zips.sort().join(',') + (mobile ? `|panel=${mobilePanelOpen}` : '');
-      return;
+      } catch { /* */ }
     }
 
-    const map = mapRef.current?.getMap();
-    if (!map) return;
-
-    const targetCounts = zipCounts.size > 0 ? zipCounts : allZipCounts;
-    if (targetCounts.size === 0) return;
-
-    const zipsWithData: string[] = [];
-    for (const [zip, count] of targetCounts) {
-      if (count > 0) zipsWithData.push(zip);
+    // Clear previous zip states
+    for (const id of prevZipIds.current) {
+      try {
+        map.setFeatureState(
+          { source: 'zctas', sourceLayer: 'zctas', id },
+          { density: 0 }
+        );
+      } catch { /* */ }
     }
-    if (zipsWithData.length === 0) return;
 
-    const mobile = window.innerWidth < 768;
-
-    // Build a stable key from the sorted ZIP set + panel state to detect changes
-    const fitKey = zipsWithData.sort().join(',') + (mobile ? `|panel=${mobilePanelOpen}` : '');
-    if (fitKey === prevFitKey.current) return;
-    prevFitKey.current = fitKey;
-
-    const bounds = computeZipBounds(geojson, new Set(zipsWithData));
-    if (!bounds) return;
-
-    // Padding accounts for UI overlays:
-    // Desktop: filter bar top (~120px), charts left (~45%), stats right (~220px)
-    // Mobile panel open: filter bar top (~200px), chart panel bottom (~340px)
-    // Mobile panel closed: filter bar top (~200px), collapse handle + safe area (~60px)
-    const padding = mobile
-      ? { top: 200, bottom: mobilePanelOpen ? 340 : 60, left: 20, right: 20 }
-      : { top: 60, bottom: 50, left: Math.round(window.innerWidth * 0.60), right: 160 };
-
-    map.fitBounds(
-      [[bounds[0], bounds[1]], [bounds[2], bounds[3]]],
-      { padding, duration: 800, maxZoom: 14 },
-    );
-  }, [mapReady, geojson, zipCounts, allZipCounts, mobilePanelOpen]);
-
-  // Derive hover data from current state — always fresh, no stale values after clicks
-  const hoveredZipStr = hoveredZip ? String(hoveredZip).padStart(5, '0') : null;
-  const hoverExcluded = hoveredZipStr ? filters.excludedZips.has(hoveredZipStr) : false;
-  const hoverSelected = hoveredZipStr ? filters.selectedZips.has(hoveredZipStr) : false;
-  // Show base count if available, fall back to demographic-only count (respects non-area filters, ignores area filters)
-  const hoverCount = hoveredZipStr
-    ? (baseZipCounts.get(hoveredZipStr) ?? demoZipCounts.get(hoveredZipStr) ?? 0)
-    : 0;
-
-  const clearHover = useCallback(() => {
-    setHoveredZip(null);
-    setHoverPos(null);
-  }, []);
-
-  // Clear map tooltip when pointer enters any overlay (cards, chart panel)
-  useEffect(() => {
-    const handler = () => clearHover();
-    window.addEventListener('card-hover-start', handler);
-    window.addEventListener('chart-panel-enter', handler);
-    return () => {
-      window.removeEventListener('card-hover-start', handler);
-      window.removeEventListener('chart-panel-enter', handler);
-    };
-  }, [clearHover]);
-
-  const onHover = useCallback((e: MapLayerMouseEvent) => {
-    const feature = e.features && e.features.length > 0 ? e.features[0] : null;
-    if (feature) {
-      const zip = feature.properties?.ZCTA5CE20 || feature.properties?.ZCTA5CE10 || feature.properties?.ZIP;
-      setHoveredZip(zip);
-      setHoverPos({ x: e.point.x, y: e.point.y });
-      resetZipFade();
-    } else {
-      clearHover();
+    // Set county feature states (raw counts)
+    for (const c of apiData.geo.counties) {
+      newCountyIds.add(c.fips);
+      try {
+        map.setFeatureState(
+          { source: 'counties', sourceLayer: 'counties', id: c.fips },
+          { density: c.total }
+        );
+      } catch { /* feature may not be loaded yet */ }
     }
-  }, [clearHover, isMobile]);
 
-  // Build ZIP → city set lookup from all records (for city-aware click behavior)
-  // Note: use globalThis.Map to avoid collision with react-map-gl's Map component
-  const zipToCities = useMemo(() => {
-    const lookup = new globalThis.Map<string, Set<string>>();
-    for (const r of allRecords) {
-      const zip = r.SKIPTRACE_ZIP;
-      const city = r.PERSONAL_CITY;
-      if (!zip || !city) continue;
-      const normalized = city.toLowerCase().split(' ').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-      if (!lookup.has(zip)) lookup.set(zip, new Set());
-      lookup.get(zip)!.add(normalized);
+    // Track all zip IDs
+    for (const z of apiData.geo.zips) {
+      newZipIds.add(z.zip);
     }
-    return lookup;
-  }, [allRecords]);
 
-  const hasGeoFilter = filters.county.include.size > 0 || filters.county.exclude.size > 0
-    || filters.city.include.size > 0 || filters.city.exclude.size > 0;
+    prevCountyIds.current = newCountyIds;
+    prevZipIds.current = newZipIds;
 
-  const onClick = useCallback((e: MapLayerMouseEvent) => {
-    const feature = e.features?.[0];
-    if (feature) {
-      const zip = feature.properties?.ZCTA5CE20 || feature.properties?.ZCTA5CE10 || feature.properties?.ZIP;
-      if (zip) {
-        const zipStr = String(zip).padStart(5, '0');
-        const baseCount = baseZipCounts.get(zipStr) || 0;
-        const totalCount = allZipCounts.get(zipStr) || 0;
-        const isExcluded = filters.excludedZips.has(zipStr);
-        const isSelected = filters.selectedZips.has(zipStr);
+    // Compute and apply viewport-normalized zip density
+    const computeAndApplyZipDensity = () => {
+      const zoom = map.getZoom();
+      const allZips = apiData.geo.zips;
 
-        // Nothing to click if ZIP has no records at all
-        if (totalCount === 0 && !isExcluded && !isSelected) return;
+      if (zoom >= 7) {
+        // Viewport-aware: normalize only against visible zips
+        const bounds = map.getBounds();
+        // Pad bounds by ~1 county width (~0.5 degrees) so edge counties are included
+        const pad = 0.5;
+        const west = bounds.getWest() - pad;
+        const east = bounds.getEast() + pad;
+        const south = bounds.getSouth() - pad;
+        const north = bounds.getNorth() + pad;
 
-        // If already excluded, un-exclude it
-        if (isExcluded) {
-          skipNextFit.current = true;
-          dispatch({ type: 'TOGGLE_EXCLUDE_ZIP', zip: zipStr });
-          return;
-        }
-
-        // If already selected (as additional ZIP), deselect it
-        if (isSelected) {
-          skipNextFit.current = true;
-          dispatch({ type: 'TOGGLE_ZIP', zip: zipStr });
-          return;
-        }
-
-        // When location filters are active (county or city)...
-        if (hasGeoFilter) {
-          const demoCount = demoZipCounts.get(zipStr) || 0;
-          const county = ZIP_TO_COUNTY[zipStr] || '';
-          const cities = zipToCities.get(zipStr);
-
-          // Check if ZIP is excluded by a geo exclude filter
-          let isGeoExcluded = false;
-          if (filters.county.exclude.size > 0 && county && filters.county.exclude.has(county)) isGeoExcluded = true;
-          if (!isGeoExcluded && filters.city.exclude.size > 0 && cities) {
-            for (const city of cities) {
-              if (filters.city.exclude.has(city)) { isGeoExcluded = true; break; }
-            }
+        // Find visible zips by lat/lng
+        const visibleZips: GeoZip[] = [];
+        for (const z of allZips) {
+          if (z.lat != null && z.lng != null &&
+              z.lng >= west && z.lng <= east &&
+              z.lat >= south && z.lat <= north) {
+            visibleZips.push(z);
           }
+        }
 
-          // If ZIP is geo-excluded but has demographic data, allow adding it back
-          if (isGeoExcluded && demoCount > 0) {
-            skipNextFit.current = true;
-            dispatch({ type: 'TOGGLE_ZIP', zip: zipStr });
+        // Local max for normalization
+        let localMax = 0;
+        for (const z of visibleZips) { if (z.total > localMax) localMax = z.total; }
+        const norm = localMax > 0 ? 100 / localMax : 0;
+
+        // Apply normalized density to all zips
+        for (const z of allZips) {
+          try {
+            map.setFeatureState(
+              { source: 'zctas', sourceLayer: 'zctas', id: z.zip },
+              { density: z.total * norm }
+            );
+          } catch { /* */ }
+        }
+      } else {
+        // Below zip zoom: use global normalization
+        const norm = globalMaxZip > 0 ? 100 / globalMaxZip : 0;
+        for (const z of allZips) {
+          try {
+            map.setFeatureState(
+              { source: 'zctas', sourceLayer: 'zctas', id: z.zip },
+              { density: z.total * norm }
+            );
+          } catch { /* */ }
+        }
+      }
+    };
+
+    // Store in ref so moveend handler can access it
+    applyZipDensity.current = computeAndApplyZipDensity;
+
+    // Initial apply
+    computeAndApplyZipDensity();
+
+    // Re-apply on source load events (tiles load incrementally)
+    const handleSourceData = (e: any) => {
+      if (e.sourceId === 'counties' && e.isSourceLoaded) {
+        for (const c of apiData.geo.counties) {
+          try {
+            map.setFeatureState(
+              { source: 'counties', sourceLayer: 'counties', id: c.fips },
+              { density: c.total }
+            );
+          } catch { /* */ }
+        }
+      }
+      if (e.sourceId === 'zctas' && e.isSourceLoaded) {
+        computeAndApplyZipDensity();
+      }
+    };
+
+    map.on('sourcedata', handleSourceData);
+    return () => { map.off('sourcedata', handleSourceData); };
+  }, [mapReady, apiData]);
+
+  // Viewport-aware: re-normalize zip density on pan/zoom
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+
+    const onMoveEnd = () => { applyZipDensity.current(); };
+    map.on('moveend', onMoveEnd);
+    return () => { map.off('moveend', onMoveEnd); };
+  }, [mapReady]);
+
+  // Hover handling
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+
+    const onMouseMove = (e: maplibregl.MapMouseEvent) => {
+      const zoom = map.getZoom();
+      const point = e.point;
+
+      // Check ZCTA layer first at higher zooms
+      if (zoom >= 7) {
+        const zctaFeatures = map.queryRenderedFeatures(point, { layers: ['zcta-fill'] });
+        if (zctaFeatures.length > 0) {
+          const f = zctaFeatures[0];
+          const zip = f.properties?.GEOID20;
+          if (zip) {
+            const data = zipMap.get(zip);
+            setHoveredFeature({
+              name: `ZIP ${zip}`,
+              count: data?.total || 0,
+              type: 'zip',
+            });
+            setHoverPos({ x: point.x, y: point.y });
+            resetFade();
+            map.getCanvas().style.cursor = 'pointer';
             return;
           }
+        }
+      }
 
-          // Check if ZIP is inside any included geo (OR logic)
-          let isInsideGeo = false;
-          if (filters.county.include.size > 0 && county && filters.county.include.has(county)) isInsideGeo = true;
-          if (!isInsideGeo && filters.city.include.size > 0 && cities) {
-            for (const city of cities) {
-              if (filters.city.include.has(city)) { isInsideGeo = true; break; }
+      // County layer at lower zooms
+      if (zoom < 10) {
+        const countyFeatures = map.queryRenderedFeatures(point, { layers: ['county-fill'] });
+        if (countyFeatures.length > 0) {
+          const f = countyFeatures[0];
+          const fips = f.properties?.GEOID;
+          const name = f.properties?.NAME;
+          if (fips) {
+            const data = countyMap.get(fips);
+            setHoveredFeature({
+              name: `${name || fips} County`,
+              count: data?.total || 0,
+              type: 'county',
+            });
+            setHoverPos({ x: point.x, y: point.y });
+            resetFade();
+            map.getCanvas().style.cursor = data && data.total > 0 ? 'pointer' : 'grab';
+            return;
+          }
+        }
+      }
+
+      setHoveredFeature(null);
+      setHoverPos(null);
+      map.getCanvas().style.cursor = 'grab';
+    };
+
+    const onMouseLeave = () => {
+      setHoveredFeature(null);
+      setHoverPos(null);
+      map.getCanvas().style.cursor = 'grab';
+    };
+
+    const onClick = (e: maplibregl.MapMouseEvent) => {
+      const zoom = map.getZoom();
+      const point = e.point;
+
+      // Click county to zoom in
+      if (zoom < 10) {
+        const countyFeatures = map.queryRenderedFeatures(point, { layers: ['county-fill'] });
+        if (countyFeatures.length > 0) {
+          const f = countyFeatures[0];
+          const fips = f.properties?.GEOID;
+          const data = countyMap.get(fips);
+          if (data && data.total > 0) {
+            const geometry = f.geometry as any;
+            if (geometry) {
+              const bounds = new maplibregl.LngLatBounds();
+              const walkCoords = (coords: any) => {
+                if (typeof coords[0] === 'number') {
+                  bounds.extend(coords as [number, number]);
+                } else {
+                  for (const c of coords) walkCoords(c);
+                }
+              };
+              walkCoords(geometry.coordinates);
+              if (!bounds.isEmpty()) {
+                map.fitBounds(bounds, { padding: 50, duration: 800, maxZoom: 11 });
+              }
             }
           }
-
-          // If no include filters, check if ZIP is in the base set (exclude-only geo filters)
-          if (filters.county.include.size === 0 && filters.city.include.size === 0) {
-            isInsideGeo = baseCount > 0;
-          }
-
-          if (isInsideGeo) {
-            skipNextFit.current = true;
-            dispatch({ type: 'TOGGLE_EXCLUDE_ZIP', zip: zipStr });
-          } else if (demoCount > 0) {
-            skipNextFit.current = true;
-            dispatch({ type: 'TOGGLE_ZIP', zip: zipStr });
-          }
-          return;
         }
-
-        // No geo filters active — only allow clicks on ZIPs with base records
-        if (baseCount === 0) return;
-        skipNextFit.current = true;
-        dispatch({ type: 'TOGGLE_ZIP', zip: zipStr });
       }
-    }
-  }, [dispatch, baseZipCounts, demoZipCounts, allZipCounts, filters.excludedZips, filters.selectedZips, filters.county, filters.city, hasGeoFilter, zipToCities]);
+    };
+
+    map.on('mousemove', onMouseMove);
+    map.on('mouseleave', onMouseLeave);
+    map.on('click', onClick);
+
+    // Clear tooltip when pointer enters cards
+    const clearHandler = () => {
+      setHoveredFeature(null);
+      setHoverPos(null);
+    };
+    window.addEventListener('card-hover-start', clearHandler);
+    window.addEventListener('chart-panel-enter', clearHandler);
+
+    return () => {
+      map.off('mousemove', onMouseMove);
+      map.off('mouseleave', onMouseLeave);
+      map.off('click', onClick);
+      window.removeEventListener('card-hover-start', clearHandler);
+      window.removeEventListener('chart-panel-enter', clearHandler);
+    };
+  }, [mapReady, countyMap, zipMap, resetFade]);
 
   return (
     <div className="absolute inset-0">
-      <Map
-        ref={mapRef}
-        mapboxAccessToken={TOKEN}
-        initialViewState={INITIAL_VIEW}
-        style={{ width: '100%', height: '100%' }}
-        mapStyle="mapbox://styles/mapbox/dark-v11"
-        onLoad={() => setMapReady(true)}
-        interactiveLayerIds={geojson?.features.length ? ['zip-fill'] : []}
-        onMouseMove={onHover}
-        onMouseLeave={clearHover}
-        onClick={onClick}
-        cursor={hoveredZipStr && ((allZipCounts.get(hoveredZipStr) || 0) > 0 || filters.excludedZips.has(hoveredZipStr) || filters.selectedZips.has(hoveredZipStr)) ? 'pointer' : 'grab'}
-      >
-        {geojson && geojson.features.length > 0 && (
-          <Source id="zips" type="geojson" data={geojson}>
-            <Layer
-              id="zip-fill"
-              type="fill"
-              paint={{
-                'fill-color': [
-                  'interpolate',
-                  ['linear'],
-                  ['coalesce', ['feature-state', 'density'], 0],
-                  0, 'rgba(0,0,0,0)',
-                  1, '#1e3a5f',
-                  5, '#2563eb',
-                  15, '#7c3aed',
-                  40, '#a855f7',
-                  100, '#dc2626',
-                  300, '#ef4444',
-                ],
-                'fill-opacity': 0.7,
-              }}
-            />
-            {/* Faint border for all ZIPs with data — visible even when not selected */}
-            <Layer
-              id="zip-base-outline"
-              type="line"
-              paint={{
-                'line-color': [
-                  'interpolate',
-                  ['linear'],
-                  ['coalesce', ['feature-state', 'baseDensity'], 0],
-                  0, 'rgba(255,255,255,0)',
-                  1, 'rgba(255,255,255,0.12)',
-                ],
-                'line-width': 0.5,
-              }}
-            />
-            <Layer
-              id="zip-outline"
-              type="line"
-              paint={{
-                'line-color': [
-                  'interpolate',
-                  ['linear'],
-                  ['coalesce', ['feature-state', 'density'], 0],
-                  0, 'rgba(255,255,255,0)',
-                  1, '#3b82f6',
-                  5, '#6366f1',
-                  15, '#8b5cf6',
-                  40, '#a855f7',
-                  100, '#ef4444',
-                  300, '#f87171',
-                ],
-                'line-width': [
-                  'interpolate',
-                  ['linear'],
-                  ['coalesce', ['feature-state', 'density'], 0],
-                  0, 0,
-                  1, 0.8,
-                  15, 1.2,
-                  100, 1.8,
-                  300, 2.5,
-                ],
-              }}
-            />
-            {/* Highlight selected ZIPs (gold) */}
-            {filters.selectedZips.size > 0 && (
-              <Layer
-                id="zip-selected"
-                type="line"
-                filter={[
-                  'any',
-                  ['in', ['get', 'ZCTA5CE20'], ['literal', [...filters.selectedZips]]],
-                  ['in', ['get', 'ZCTA5CE10'], ['literal', [...filters.selectedZips]]],
-                  ['in', ['get', 'ZIP'], ['literal', [...filters.selectedZips]]],
-                ]}
-                paint={{
-                  'line-color': '#fbbf24',
-                  'line-width': 2.5,
-                }}
-              />
-            )}
-            {/* Highlight excluded ZIPs (gray) */}
-            {filters.excludedZips.size > 0 && (
-              <Layer
-                id="zip-excluded"
-                type="line"
-                filter={[
-                  'any',
-                  ['in', ['get', 'ZCTA5CE20'], ['literal', [...filters.excludedZips]]],
-                  ['in', ['get', 'ZCTA5CE10'], ['literal', [...filters.excludedZips]]],
-                  ['in', ['get', 'ZIP'], ['literal', [...filters.excludedZips]]],
-                ]}
-                paint={{
-                  'line-color': '#6b7280',
-                  'line-width': 2,
-                  'line-dasharray': [2, 2],
-                }}
-              />
-            )}
-          </Source>
-        )}
-      </Map>
+      <div ref={mapContainer} className="w-full h-full" />
+
+      {/* Loading spinner */}
+      {loading && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
+          <div className="w-10 h-10 rounded-full border-[3px] border-gray-700 border-t-purple-500 animate-spin" />
+        </div>
+      )}
 
       {/* Hover tooltip */}
-      {hoveredZip && hoverPos && (
+      {hoveredFeature && hoverPos && (
         <div
           className="glass-light rounded-lg px-3 py-2 pointer-events-none absolute z-20"
-          style={{ left: hoverPos.x + 12, top: hoverPos.y - 30, ...zipFadeStyle }}
+          style={{ left: hoverPos.x + 12, top: hoverPos.y - 30, ...fadeStyle }}
         >
-          <div className="text-xs font-medium text-white">ZIP {hoveredZip}</div>
+          <div className="text-xs font-medium text-white">{hoveredFeature.name}</div>
           <div className="text-xs text-gray-300">
-            {hoverCount.toLocaleString()} records
-            {hoverExcluded && <span className="text-gray-500 ml-1">(excluded)</span>}
-            {hoverSelected && <span className="text-purple-400 ml-1">(selected)</span>}
+            {hoveredFeature.count.toLocaleString()} contacts
           </div>
+          {hoveredFeature.type === 'county' && (
+            <div className="text-[10px] text-gray-500 mt-0.5">Click to zoom</div>
+          )}
         </div>
       )}
     </div>

@@ -7,13 +7,8 @@ import { CREDIT_RATING_ORDER, CREDIT_RATING_LABELS } from '../../utils/constants
 
 export function CreditRatingCard({ onClose, compact }: { onClose?: () => void; compact?: boolean }) {
   useRenderPerf('CreditRatingCard');
-  const { filteredRecords } = useFilters();
-  const raw = useAggregation(
-    filteredRecords,
-    'SKIPTRACE_CREDIT_RATING',
-    CREDIT_RATING_ORDER,
-    CREDIT_RATING_LABELS,
-  );
+  const { apiData } = useFilters();
+  const raw = useAggregation(apiData?.aggregations.credit_rating, CREDIT_RATING_ORDER, CREDIT_RATING_LABELS);
   const data = raw.filter(d => d.name !== 'U');
 
   return (

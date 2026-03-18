@@ -1,17 +1,17 @@
 import { useMemo } from 'react';
-import type { IntentRecord } from '../types/record';
-import { countBy, topN, type CountItem } from '../utils/aggregation';
+import { reshapeBuckets, topN, type CountItem } from '../utils/aggregation';
+import type { BucketCount } from '../types/dashboard';
 
+/** Reshape API bucket data into chart-ready CountItem[] */
 export function useAggregation(
-  records: IntentRecord[],
-  key: keyof IntentRecord,
+  buckets: BucketCount[] | undefined,
   order?: string[],
   labelMap?: Record<string, string>,
   top?: number,
-  normalizeKeys?: boolean,
 ): CountItem[] {
   return useMemo(() => {
-    const items = countBy(records, key, order, labelMap, normalizeKeys);
+    if (!buckets || buckets.length === 0) return [];
+    const items = reshapeBuckets(buckets, order, labelMap);
     return top ? topN(items, top) : items;
-  }, [records, key, order, labelMap, top, normalizeKeys]);
+  }, [buckets, order, labelMap, top]);
 }

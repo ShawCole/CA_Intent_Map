@@ -1,24 +1,8 @@
 import { useMemo, useState, useRef, useEffect, useCallback } from 'react';
 import { useFilters, type MultiSelectKey } from '../contexts/FilterContext';
-import { HOME_VALUE_ORDER, AGE_RANGE_ORDER, AGE_RANGE_LABELS, GENDER_ORDER, INCOME_RANGE_ORDER, INCOME_RANGE_LABELS, NET_WORTH_ORDER, NET_WORTH_LABELS, CREDIT_RATING_ORDER, CREDIT_RATING_LABELS, SENIORITY_ORDER, SENIORITY_LABELS, LANGUAGE_CODE_LABELS } from '../utils/constants';
-import { ZIP_TO_COUNTY } from '../utils/zipCounty';
+import { INTENT_ORDER, INTENT_LABELS, AGE_RANGE_ORDER, AGE_RANGE_LABELS, GENDER_ORDER, INCOME_RANGE_ORDER, INCOME_RANGE_LABELS, NET_WORTH_ORDER, NET_WORTH_LABELS, CREDIT_RATING_ORDER, CREDIT_RATING_LABELS, SENIORITY_ORDER, SENIORITY_LABELS, LANGUAGE_CODE_LABELS } from '../utils/constants';
 import { X, Copy, Check, ChevronDown } from 'lucide-react';
 import { MultiSelectPopover } from './MultiSelectPopover';
-
-function Pill({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
-        active
-          ? 'bg-purple-600/80 text-white border border-purple-400/40'
-          : 'glass-light text-gray-300 hover:text-white hover:bg-white/10'
-      }`}
-    >
-      {label}
-    </button>
-  );
-}
 
 function ZipChipGroup({
   zips,
@@ -39,7 +23,6 @@ function ZipChipGroup({
   const count = zips.size;
   const zipList = Array.from(zips).sort();
 
-  // Close tooltip on click outside
   useEffect(() => {
     if (!showTooltip) return;
     function handleClick(e: MouseEvent) {
@@ -125,7 +108,7 @@ function toTitleCase(s: string): string {
 const MOBILE_BP = 768;
 
 export function FilterBar({ onCollapseChange }: { onCollapseChange?: (collapsed: boolean) => void } = {}) {
-  const { filters, allRecords, dispatch } = useFilters();
+  const { filters, apiData, dispatch, topics } = useFilters();
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < MOBILE_BP);
   const [filtersOpen, setFiltersOpen] = useState(true);
 
@@ -139,47 +122,46 @@ export function FilterBar({ onCollapseChange }: { onCollapseChange?: (collapsed:
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
-  // Build city options sorted by frequency — ALL cities, normalized to title case
+  // City options from API filterOptions (already sorted by count)
   const cityOptions = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const r of allRecords) {
-      const city = r.PERSONAL_CITY;
-      if (city) {
-        const normalized = toTitleCase(city);
-        counts.set(normalized, (counts.get(normalized) || 0) + 1);
-      }
-    }
-    return Array.from(counts.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([name]) => name);
-  }, [allRecords]);
+    if (!apiData?.filterOptions?.cities) return [];
+    return apiData.filterOptions.cities.map(c => c.value);
+  }, [apiData?.filterOptions?.cities]);
 
-  // Build language options sorted by frequency (exclude UX)
+  // Language options from API filterOptions
   const languageOptions = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const r of allRecords) {
-      const lang = r.SKIPTRACE_LANGUAGE_CODE;
-      if (lang) counts.set(lang, (counts.get(lang) || 0) + 1);
-    }
-    return Array.from(counts.entries())
-      .sort((a, b) => b[1] - a[1])
-      .filter(([code]) => code !== 'UX')
-      .map(([code]) => code);
-  }, [allRecords]);
+    if (!apiData?.filterOptions?.languages) return [];
+    return apiData.filterOptions.languages
+      .filter(l => l.code !== 'UX')
+      .map(l => l.code);
+  }, [apiData?.filterOptions?.languages]);
 
-  // Build county options sorted by frequency
+  // County options from API filterOptions (FIPS → "Name, ST" label)
   const countyOptions = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const r of allRecords) {
-      const county = ZIP_TO_COUNTY[r.SKIPTRACE_ZIP];
-      if (county) counts.set(county, (counts.get(county) || 0) + 1);
-    }
-    return Array.from(counts.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([name]) => name);
-  }, [allRecords]);
+    if (!apiData?.filterOptions?.counties) return [];
+    return apiData.filterOptions.counties.map(c => c.fips);
+  }, [apiData?.filterOptions?.counties]);
 
-  const allActive = filters.homeValueTabs.size === 0;
+  const countyLabelMap = useMemo(() => {
+    if (!apiData?.filterOptions?.counties) return {};
+    const map: Record<string, string> = {};
+    for (const c of apiData.filterOptions.counties) {
+      map[c.fips] = `${c.name}, ${c.state}`;
+    }
+    return map;
+  }, [apiData?.filterOptions?.counties]);
+
+  // State options from API (derive from counties)
+  const stateOptions = useMemo(() => {
+    if (!apiData?.filterOptions?.counties) return [];
+    const stateCounts = new Map<string, number>();
+    for (const c of apiData.filterOptions.counties) {
+      stateCounts.set(c.state, (stateCounts.get(c.state) || 0) + c.count);
+    }
+    return Array.from(stateCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([st]) => st);
+  }, [apiData?.filterOptions?.counties]);
 
   // Build active filter chips (non-ZIP)
   const activeFilters: { label: string; clear: () => void }[] = [];
@@ -205,11 +187,7 @@ export function FilterBar({ onCollapseChange }: { onCollapseChange?: (collapsed:
       if (run.length === 1) return labelMap[run[0]] ?? run[0];
       const firstLabel = labelMap[run[0]] ?? run[0];
       const lastLabel = labelMap[run[run.length - 1]] ?? run[run.length - 1];
-      // Extract low from first label, high from last label
-      // Labels: "< $20k", "$20k-$45k", "> $250k", "< -$2.5k", "-$2.5k-$2.5k"
-      // Split on the hyphen that separates low-high (not negative sign hyphens)
       const splitRange = (lbl: string) => {
-        // Match "LOW-HIGH" where the separator hyphen comes after k/M/digit
         const m = lbl.match(/^(.+[kM\d])-(\$[\d.]+[kM]?\+?)$/);
         return m ? [m[1], m[2]] : [lbl, lbl];
       };
@@ -245,7 +223,29 @@ export function FilterBar({ onCollapseChange }: { onCollapseChange?: (collapsed:
     return rangeLabels.join(', ');
   };
 
-  // Range-merge configs: these use consecutive-range shorthand in chips
+  // Intent chip
+  {
+    const f = filters.intent;
+    const total = f.include.size + f.exclude.size;
+    if (total > 0) {
+      const parts: string[] = [];
+      if (f.include.size > 0) {
+        if (f.include.size <= 2) {
+          const names = [...f.include].map(v => INTENT_LABELS[v] ?? v);
+          parts.push(names.join(', '));
+        } else {
+          parts.push(`${f.include.size} incl`);
+        }
+      }
+      if (f.exclude.size > 0) parts.push(`${f.exclude.size} excl`);
+      activeFilters.push({
+        label: `Intent: ${parts.join(', ')}`,
+        clear: () => dispatch({ type: 'CLEAR_MULTI_SELECT', key: 'intent' }),
+      });
+    }
+  }
+
+  // Range-merge configs
   const rangeMergeConfigs: { key: MultiSelectKey; label: string; order: string[]; labelMap: Record<string, string> }[] = [
     { key: 'incomeRange', label: 'Income', order: INCOME_RANGE_ORDER, labelMap: INCOME_RANGE_LABELS },
     { key: 'netWorth', label: 'Net Worth', order: NET_WORTH_ORDER, labelMap: NET_WORTH_LABELS },
@@ -283,10 +283,11 @@ export function FilterBar({ onCollapseChange }: { onCollapseChange?: (collapsed:
   const multiSelectConfigs: { key: MultiSelectKey; label: string; labelMap?: Record<string, string> }[] = [
     { key: 'gender', label: 'Gender', labelMap: { F: 'Female', M: 'Male', U: 'Unknown' } },
     { key: 'creditRating', label: 'Credit', labelMap: CREDIT_RATING_LABELS },
-    { key: 'county', label: 'County' },
+    { key: 'county', label: 'County', labelMap: countyLabelMap },
     { key: 'city', label: 'City' },
     { key: 'language', label: 'Language', labelMap: LANGUAGE_CODE_LABELS },
     { key: 'seniorityLevel', label: 'Seniority', labelMap: SENIORITY_LABELS },
+    { key: 'state', label: 'State' },
   ];
 
   for (const { key, label, labelMap } of multiSelectConfigs) {
@@ -310,47 +311,7 @@ export function FilterBar({ onCollapseChange }: { onCollapseChange?: (collapsed:
     }
   }
 
-  // Home Value chip (mobile only — desktop uses pills)
-  // Merge consecutive ranges: "$350-400k" + "$400-450k" → "$350-450k"
-  if (isMobile && filters.homeValueTabs.size > 0) {
-    // Sort selected tabs by their position in HOME_VALUE_ORDER
-    const sorted = HOME_VALUE_ORDER.filter(t => filters.homeValueTabs.has(t));
-    // Group into consecutive runs
-    const runs: string[][] = [];
-    for (const tab of sorted) {
-      const idx = HOME_VALUE_ORDER.indexOf(tab);
-      const lastRun = runs[runs.length - 1];
-      if (lastRun && HOME_VALUE_ORDER.indexOf(lastRun[lastRun.length - 1]) === idx - 1) {
-        lastRun.push(tab);
-      } else {
-        runs.push([tab]);
-      }
-    }
-    // Extract low end from first tab, high end from last tab in each run
-    const parselow = (t: string) => t.replace(/^(\$[\d,]+).*/, '$1');
-    const parseHigh = (t: string) => {
-      if (t === 'Over $1M') return '$1M+';
-      const m = t.match(/-([\d,]+k)/);
-      return m ? `$${m[1]}` : t;
-    };
-    const rangeLabels = runs.map(run => {
-      if (run.length === 1) return run[0];
-      const low = parselow(run[0]);
-      const high = parseHigh(run[run.length - 1]);
-      return `${low}-${high}`;
-    });
-    const hvLabel = rangeLabels.join(', ');
-    activeFilters.unshift({
-      label: `Home Value: ${hvLabel}`,
-      clear: () => {
-        for (const tab of filters.homeValueTabs) {
-          dispatch({ type: 'TOGGLE_HOME_VALUE', tab });
-        }
-      },
-    });
-  }
-
-  const hasAnyFilter = filters.homeValueTabs.size > 0 || activeFilters.length > 0 || filters.selectedZips.size > 0 || filters.excludedZips.size > 0;
+  const hasAnyFilter = activeFilters.length > 0 || filters.selectedZips.size > 0 || filters.excludedZips.size > 0;
 
   const handleToggle = (key: MultiSelectKey) => (value: string, state: 'include' | 'exclude' | 'unset') => {
     dispatch({ type: 'TOGGLE_MULTI_SELECT', key, value, state });
@@ -359,6 +320,21 @@ export function FilterBar({ onCollapseChange }: { onCollapseChange?: (collapsed:
   const handleClear = (key: MultiSelectKey) => () => {
     dispatch({ type: 'CLEAR_MULTI_SELECT', key });
   };
+
+  const topicDisplay = toTitleCase(filters.topic.replace(/-/g, ' '));
+  const [topicOpen, setTopicOpen] = useState(false);
+  const topicRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!topicOpen) return;
+    function handleClick(e: MouseEvent) {
+      if (topicRef.current && !topicRef.current.contains(e.target as Node)) {
+        setTopicOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [topicOpen]);
 
   return (
     <div
@@ -369,7 +345,43 @@ export function FilterBar({ onCollapseChange }: { onCollapseChange?: (collapsed:
         {/* Title + collapse toggle */}
         <div className="flex items-start justify-between gap-2 mb-2">
           <h1 className="text-white font-bold text-lg leading-tight">
-            Searching for <span className="text-purple-400">"Sell Home For Cash"</span> in the past 7 days
+            {topics.length > 1 ? (
+              <div ref={topicRef} className="relative inline-block">
+                <button
+                  onClick={() => setTopicOpen(!topicOpen)}
+                  className="text-purple-400 hover:text-purple-300 transition-colors inline-flex items-center gap-1"
+                >
+                  {topicDisplay}
+                  <ChevronDown size={14} className={`transition-transform duration-200 ${topicOpen ? 'rotate-180' : ''}`} />
+                </button>
+                {topicOpen && (
+                  <div className="absolute top-full left-0 mt-1 z-50 min-w-[240px] rounded-xl border border-white/10 bg-gray-900/95 backdrop-blur-xl shadow-2xl py-1">
+                    {topics.map(t => (
+                      <button
+                        key={t.topic_slug}
+                        onClick={() => {
+                          dispatch({ type: 'SET_TOPIC', topic: t.topic_slug });
+                          setTopicOpen(false);
+                        }}
+                        className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center justify-between ${
+                          t.topic_slug === filters.topic
+                            ? 'text-purple-400 bg-purple-500/10'
+                            : 'text-gray-300 hover:text-white hover:bg-white/5'
+                        }`}
+                      >
+                        <span>{t.topic_label}</span>
+                        <span className="text-[10px] text-gray-500 ml-3">
+                          {Number(t.signal_count).toLocaleString()}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <span className="text-purple-400">{topicDisplay}</span>
+            )}
+            {' '}Intent Dashboard
           </h1>
           <button
             onClick={() => setFiltersOpen(prev => !prev)}
@@ -381,42 +393,16 @@ export function FilterBar({ onCollapseChange }: { onCollapseChange?: (collapsed:
 
         {/* Collapsible filter content */}
         <div className={`overflow-hidden transition-all duration-300 ${filtersOpen ? 'max-h-[500px] opacity-100' : 'max-h-0 opacity-0'}`}>
-        {/* Home value pills (desktop only) */}
-        {!isMobile && (
-          <div className="flex flex-wrap gap-1.5 mb-2">
-            <Pill
-              label="All"
-              active={allActive}
-              onClick={() => dispatch({ type: 'CLEAR_ALL' })}
-            />
-            {HOME_VALUE_ORDER.map(tab => (
-              <Pill
-                key={tab}
-                label={tab}
-                active={filters.homeValueTabs.has(tab)}
-                onClick={() => dispatch({ type: 'TOGGLE_HOME_VALUE', tab })}
-              />
-            ))}
-          </div>
-        )}
-
-        {/* Multi-select popovers + active chips */}
+        {/* Multi-select popovers */}
         <div className="flex items-center gap-2 flex-wrap">
-          {isMobile && (
-            <MultiSelectPopover
-              label="Home Value"
-              options={HOME_VALUE_ORDER}
-              filter={{ include: filters.homeValueTabs, exclude: new Set<string>() }}
-              onToggle={(value, state) => {
-                if (state === 'include' && !filters.homeValueTabs.has(value)) {
-                  dispatch({ type: 'TOGGLE_HOME_VALUE', tab: value });
-                } else if (state !== 'include' && filters.homeValueTabs.has(value)) {
-                  dispatch({ type: 'TOGGLE_HOME_VALUE', tab: value });
-                }
-              }}
-              onClear={() => dispatch({ type: 'CLEAR_ALL' })}
-            />
-          )}
+          <MultiSelectPopover
+            label="Intent"
+            options={INTENT_ORDER}
+            labelMap={INTENT_LABELS}
+            filter={filters.intent}
+            onToggle={handleToggle('intent')}
+            onClear={handleClear('intent')}
+          />
           <MultiSelectPopover
             label={isMobile ? 'Age' : 'Age Range'}
             options={AGE_RANGE_ORDER}
@@ -458,6 +444,13 @@ export function FilterBar({ onCollapseChange }: { onCollapseChange?: (collapsed:
             onClear={handleClear('netWorth')}
           />
           <MultiSelectPopover
+            label="State"
+            options={stateOptions}
+            filter={filters.state}
+            onToggle={handleToggle('state')}
+            onClear={handleClear('state')}
+          />
+          <MultiSelectPopover
             label="City"
             options={cityOptions}
             filter={filters.city}
@@ -467,6 +460,7 @@ export function FilterBar({ onCollapseChange }: { onCollapseChange?: (collapsed:
           <MultiSelectPopover
             label="County"
             options={countyOptions}
+            labelMap={countyLabelMap}
             filter={filters.county}
             onToggle={handleToggle('county')}
             onClear={handleClear('county')}
@@ -487,7 +481,6 @@ export function FilterBar({ onCollapseChange }: { onCollapseChange?: (collapsed:
             onToggle={handleToggle('seniorityLevel')}
             onClear={handleClear('seniorityLevel')}
           />
-
         </div>
         </div>{/* end collapsible */}
 

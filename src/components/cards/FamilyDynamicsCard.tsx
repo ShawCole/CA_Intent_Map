@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useFilters } from '../../contexts/FilterContext';
 import { useRenderPerf } from '../../hooks/useRenderPerf';
 import { FloatingCard } from './FloatingCard';
@@ -5,7 +6,20 @@ import { FamilyDoughnut } from '../charts/FamilyDoughnut';
 
 export function FamilyDynamicsCard({ onClose, compact }: { onClose?: () => void; compact?: boolean }) {
   useRenderPerf('FamilyDynamicsCard');
-  const { filteredRecords } = useFilters();
+  const { apiData } = useFilters();
+
+  // Build fake records array that FamilyDoughnut can consume
+  // FamilyDoughnut only reads MARRIED and CHILDREN fields
+  const familyRecords = useMemo(() => {
+    if (!apiData) return [];
+    const f = apiData.aggregations.family;
+    const records: { MARRIED: string; CHILDREN: string }[] = [];
+    for (let i = 0; i < f.married_children; i++) records.push({ MARRIED: 'Y', CHILDREN: 'Y' });
+    for (let i = 0; i < f.married_no_children; i++) records.push({ MARRIED: 'Y', CHILDREN: 'N' });
+    for (let i = 0; i < f.single_children; i++) records.push({ MARRIED: 'N', CHILDREN: 'Y' });
+    for (let i = 0; i < f.single_no_children; i++) records.push({ MARRIED: 'N', CHILDREN: 'N' });
+    return records;
+  }, [apiData]);
 
   return (
     <FloatingCard title="Family Dynamics" className="w-[280px]" onClose={onClose}>
@@ -26,7 +40,7 @@ export function FamilyDynamicsCard({ onClose, compact }: { onClose?: () => void;
           <span className="w-2 h-2 rounded-full shrink-0" style={{ background: '#9ca3af' }} /> Single
         </span>
       </div>
-      <FamilyDoughnut records={filteredRecords} height={170} compact={compact} />
+      <FamilyDoughnut records={familyRecords as any} height={170} compact={compact} />
     </FloatingCard>
   );
 }

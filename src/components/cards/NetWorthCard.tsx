@@ -9,9 +9,9 @@ import { NET_WORTH_ORDER, NET_WORTH_LABELS, NET_WORTH_MOBILE_LABELS } from '../.
 
 export function NetWorthCard({ onClose, compact }: { onClose?: () => void; compact?: boolean }) {
   useRenderPerf('NetWorthCard');
-  const { filteredRecords } = useFilters();
+  const { apiData } = useFilters();
   const labels = compact ? NET_WORTH_MOBILE_LABELS : NET_WORTH_LABELS;
-  const data = useAggregation(filteredRecords, 'NET_WORTH', NET_WORTH_ORDER, labels);
+  const data = useAggregation(apiData?.aggregations.net_worth, NET_WORTH_ORDER, labels);
   const reversed = useMemo(() => [...data].reverse(), [data]);
 
   if (compact) {

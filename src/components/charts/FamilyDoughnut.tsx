@@ -3,10 +3,13 @@ import { createPortal } from 'react-dom';
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import { useTooltipFlip } from '../../hooks/useTooltipFlip';
 import { useMobileFade } from '../../hooks/useMobileTooltipDismiss';
-import type { IntentRecord } from '../../types/record';
+interface FamilyRecord {
+  MARRIED: string;
+  CHILDREN: string;
+}
 
 interface Props {
-  records: IntentRecord[];
+  records: FamilyRecord[];
   height?: number | string;
   compact?: boolean;
 }
