@@ -95,6 +95,10 @@ export interface DashboardResponse {
     counties: GeoCounty[];
     zips: GeoZip[];
   };
+  tooltipGeo: {
+    counties: GeoCounty[];
+    zips: GeoZip[];
+  } | null;
   aggregations: Aggregations;
   filterOptions: FilterOptions;
   ms: number;

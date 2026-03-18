@@ -100,6 +100,7 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
   const mapRef = useRef<maplibregl.Map | null>(null);
   const { apiData, loading, filters, dispatch } = useFilters();
   const [mapReady, setMapReady] = useState(false);
+  const [zoomLevel, setZoomLevel] = useState(INITIAL_VIEW.zoom);
   const [hoveredFeature, setHoveredFeature] = useState<{ name: string; count: number; type: 'county' | 'zip' } | null>(null);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
   const { style: fadeStyle, resetFade } = useMobileFade();
@@ -168,6 +169,7 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
       map.addSource('states', {
         type: 'vector',
         url: `pmtiles://${TILES_BASE}/states.pmtiles`,
+        promoteId: { states: 'STUSPS' },
       });
 
       // State borders — always visible
@@ -182,19 +184,46 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
         },
       });
 
-      // County fill — visible at low zoom, fades out by z10
+      // Selected state highlight — bright outline + subtle fill
+      map.addLayer({
+        id: 'state-selected-fill',
+        type: 'fill',
+        source: 'states',
+        'source-layer': 'states',
+        paint: {
+          'fill-color': '#7c3aed',
+          'fill-opacity': ['case',
+            ['==', ['coalesce', ['feature-state', 'selected'], 0], 1], 0.08, 0,
+          ] as any,
+        },
+      });
+      map.addLayer({
+        id: 'state-selected-outline',
+        type: 'line',
+        source: 'states',
+        'source-layer': 'states',
+        paint: {
+          'line-color': '#a78bfa',
+          'line-width': ['case',
+            ['==', ['coalesce', ['feature-state', 'selected'], 0], 1], 2.5, 0,
+          ] as any,
+          'line-opacity': 1,
+        },
+      });
+
+      // County fill — visible at low zoom, fades out z6→z7
       map.addLayer({
         id: 'county-fill',
         type: 'fill',
         source: 'counties',
         'source-layer': 'counties',
-        maxzoom: 11,
+        maxzoom: 8,
         paint: {
           'fill-color': FILL_COLOR as any,
           'fill-opacity': [
             'interpolate', ['linear'], ['zoom'],
-            7, 0.7,
-            10, 0,
+            6, 0.7,
+            7, 0,
           ] as any,
         },
       });
@@ -204,7 +233,7 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
         type: 'line',
         source: 'counties',
         'source-layer': 'counties',
-        maxzoom: 11,
+        maxzoom: 8,
         paint: {
           'line-color': LINE_COLOR as any,
           'line-width': [
@@ -213,20 +242,20 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
           ] as any,
           'line-opacity': [
             'interpolate', ['linear'], ['zoom'],
-            7, 1,
-            10, 0,
+            6, 1,
+            7, 0,
           ] as any,
         },
       });
 
-      // County labels — z5-z10
+      // County labels — z5-z7
       map.addLayer({
         id: 'county-labels',
         type: 'symbol',
         source: 'counties',
         'source-layer': 'counties',
         minzoom: 5,
-        maxzoom: 10,
+        maxzoom: 7,
         layout: {
           'text-field': ['get', 'NAME'],
           'text-size': 10,
@@ -246,13 +275,13 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
         type: 'fill',
         source: 'zctas',
         'source-layer': 'zctas',
-        minzoom: 7,
+        minzoom: 6,
         paint: {
           'fill-color': ZIP_FILL_COLOR as any,
           'fill-opacity': [
             'interpolate', ['linear'], ['zoom'],
-            7, 0,
-            9, 0.7,
+            6, 0,
+            8, 0.7,
           ] as any,
         },
       });
@@ -262,7 +291,7 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
         type: 'line',
         source: 'zctas',
         'source-layer': 'zctas',
-        minzoom: 7,
+        minzoom: 6,
         paint: {
           'line-color': ZIP_LINE_COLOR as any,
           'line-width': [
@@ -271,8 +300,8 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
           ] as any,
           'line-opacity': [
             'interpolate', ['linear'], ['zoom'],
-            7, 0,
-            9, 1,
+            6, 0,
+            8, 1,
           ] as any,
         },
       });
@@ -283,11 +312,11 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
         type: 'line',
         source: 'zctas',
         'source-layer': 'zctas',
-        minzoom: 7,
+        minzoom: 6,
         paint: {
           'line-color': '#22d3ee',
           'line-width': ['case', ['==', ['coalesce', ['feature-state', 'selected'], 0], 1], 2.5, 0] as any,
-          'line-opacity': ['interpolate', ['linear'], ['zoom'], 7, 0, 9, 1] as any,
+          'line-opacity': ['interpolate', ['linear'], ['zoom'], 6, 0, 8, 1] as any,
         },
       });
 
@@ -297,11 +326,11 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
         type: 'fill',
         source: 'zctas',
         'source-layer': 'zctas',
-        minzoom: 7,
+        minzoom: 6,
         paint: {
           'fill-color': 'rgba(0,0,0,0.6)',
           'fill-opacity': ['case', ['==', ['coalesce', ['feature-state', 'excluded'], 0], 1],
-            ['interpolate', ['linear'], ['zoom'], 7, 0, 9, 0.6] as any,
+            ['interpolate', ['linear'], ['zoom'], 6, 0, 8, 0.6] as any,
             0,
           ] as any,
         },
@@ -311,31 +340,11 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
         type: 'line',
         source: 'zctas',
         'source-layer': 'zctas',
-        minzoom: 7,
+        minzoom: 6,
         paint: {
           'line-color': '#ef4444',
           'line-width': ['case', ['==', ['coalesce', ['feature-state', 'excluded'], 0], 1], 2, 0] as any,
-          'line-opacity': ['interpolate', ['linear'], ['zoom'], 7, 0, 9, 0.8] as any,
-        },
-      });
-
-      // ZIP labels at high zoom
-      map.addLayer({
-        id: 'zcta-labels',
-        type: 'symbol',
-        source: 'zctas',
-        'source-layer': 'zctas',
-        minzoom: 10,
-        layout: {
-          'text-field': ['get', 'GEOID20'],
-          'text-size': 9,
-          'text-font': ['Open Sans Regular'],
-          'text-allow-overlap': false,
-        },
-        paint: {
-          'text-color': 'rgba(255,255,255,0.6)',
-          'text-halo-color': 'rgba(0,0,0,0.8)',
-          'text-halo-width': 1,
+          'line-opacity': ['interpolate', ['linear'], ['zoom'], 6, 0, 8, 0.8] as any,
         },
       });
 
@@ -409,7 +418,7 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
       const zoom = map.getZoom();
       const allZips = apiData.geo.zips;
 
-      if (zoom >= 7) {
+      if (zoom >= 6) {
         // Viewport-aware: normalize only against visible zips
         const bounds = map.getBounds();
         // Pad bounds by ~1 county width (~0.5 degrees) so edge counties are included
@@ -489,9 +498,11 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
     const map = mapRef.current;
     if (!map || !mapReady) return;
 
-    const onMoveEnd = () => { applyZipDensity.current(); };
+    const onMoveEnd = () => { applyZipDensity.current(); setZoomLevel(map.getZoom()); };
+    const onZoom = () => { setZoomLevel(map.getZoom()); };
     map.on('moveend', onMoveEnd);
-    return () => { map.off('moveend', onMoveEnd); };
+    map.on('zoom', onZoom);
+    return () => { map.off('moveend', onMoveEnd); map.off('zoom', onZoom); };
   }, [mapReady]);
 
   // Auto-zoom to fit filtered geo data on load and filter changes
@@ -573,16 +584,41 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
 
     if (!hasCoords) return;
 
-    const isMobile = window.innerWidth < 768;
+    // Expand bounds with UI awareness:
+    // More buffer on left (charts panel ~340px) to shift data area right
+    const sw = bounds.getSouthWest();
+    const ne = bounds.getNorthEast();
+    const lngSpan = ne.lng - sw.lng;
+    const latSpan = ne.lat - sw.lat;
+    bounds.extend([sw.lng - lngSpan * 0.8, sw.lat - latSpan * 0.3]);
+    bounds.extend([ne.lng + lngSpan * 0.3, ne.lat + latSpan * 0.3]);
+
     map.fitBounds(bounds, {
-      padding: isMobile
-        ? { top: 80, bottom: mobilePanelOpen ? 340 : 60, left: 20, right: 20 }
-        : { top: 100, bottom: 80, left: 360, right: 80 },
+      padding: { top: 80, bottom: 60, left: 20, right: 20 },
       duration: 800,
-      maxZoom: 12,
     });
   }, [mapReady, apiData, filters.state, filters.county, filters.city,
       filters.selectedZips, filters.excludedZips, mobilePanelOpen]);
+
+  // Apply selected state highlight
+  const prevSelectedStates = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+
+    // Clear previous
+    for (const id of prevSelectedStates.current) {
+      try { map.setFeatureState({ source: 'states', sourceLayer: 'states', id }, { selected: 0 }); } catch { /* */ }
+    }
+
+    // Apply new
+    for (const st of filters.state.include) {
+      try { map.setFeatureState({ source: 'states', sourceLayer: 'states', id: st }, { selected: 1 }); } catch { /* */ }
+    }
+
+    prevSelectedStates.current = new Set(filters.state.include);
+  }, [mapReady, filters.state.include]);
 
   // Apply selected/excluded ZIP visual states
   const prevSelectedRef = useRef<Set<string>>(new Set());
@@ -622,7 +658,7 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
       const point = e.point;
 
       // Check ZCTA layer first at higher zooms
-      if (zoom >= 7) {
+      if (zoom >= 6) {
         const zctaFeatures = map.queryRenderedFeatures(point, { layers: ['zcta-fill'] });
         if (zctaFeatures.length > 0) {
           const f = zctaFeatures[0];
@@ -643,7 +679,7 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
       }
 
       // County layer at lower zooms
-      if (zoom < 10) {
+      if (zoom < 7) {
         const countyFeatures = map.queryRenderedFeatures(point, { layers: ['county-fill'] });
         if (countyFeatures.length > 0) {
           const f = countyFeatures[0];
@@ -684,7 +720,7 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
       // In excludedZips → remove (undo exclude)
       // Currently in dataset (colored) → exclude it
       // Currently out of dataset (not colored) → include it
-      if (zoom >= 9) {
+      if (zoom >= 8) {
         const zctaFeatures = map.queryRenderedFeatures(point, { layers: ['zcta-fill'] });
         if (zctaFeatures.length > 0) {
           const zip = zctaFeatures[0].properties?.GEOID20;
@@ -713,7 +749,7 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
       }
 
       // County click — zoom in
-      if (zoom < 10) {
+      if (zoom < 7) {
         const countyFeatures = map.queryRenderedFeatures(point, { layers: ['county-fill'] });
         if (countyFeatures.length > 0) {
           const f = countyFeatures[0];
@@ -771,6 +807,11 @@ export function MapView({ mobilePanelOpen }: { mobilePanelOpen?: boolean }) {
           <div className="w-10 h-10 rounded-full border-[3px] border-gray-700 border-t-purple-500 animate-spin" />
         </div>
       )}
+
+      {/* Zoom level */}
+      <div className="absolute bottom-3 right-3 z-10 w-12 h-12 flex items-center justify-center rounded-lg bg-gray-900/80 border border-white/10 backdrop-blur-sm pointer-events-none">
+        <span className="text-[11px] text-gray-200 font-mono font-medium">{zoomLevel.toFixed(2)}</span>
+      </div>
 
       {/* Hover tooltip */}
       {hoveredFeature && hoverPos && (

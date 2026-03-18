@@ -151,17 +151,14 @@ export function FilterBar({ onCollapseChange }: { onCollapseChange?: (collapsed:
     return map;
   }, [apiData?.filterOptions?.counties]);
 
-  // State options from API (derive from counties)
-  const stateOptions = useMemo(() => {
-    if (!apiData?.filterOptions?.counties) return [];
-    const stateCounts = new Map<string, number>();
-    for (const c of apiData.filterOptions.counties) {
-      stateCounts.set(c.state, (stateCounts.get(c.state) || 0) + c.count);
-    }
-    return Array.from(stateCounts.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([st]) => st);
-  }, [apiData?.filterOptions?.counties]);
+  // All 50 states + DC — always available regardless of filters
+  const stateOptions = useMemo(() => [
+    'AL','AK','AZ','AR','CA','CO','CT','DE','DC','FL',
+    'GA','HI','ID','IL','IN','IA','KS','KY','LA','ME',
+    'MD','MA','MI','MN','MS','MO','MT','NE','NV','NH',
+    'NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI',
+    'SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY',
+  ], []);
 
   // Build active filter chips (non-ZIP)
   const activeFilters: { label: string; clear: () => void }[] = [];
